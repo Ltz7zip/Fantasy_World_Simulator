@@ -67,6 +67,16 @@ terrain/
 
 ## 常见问题
 
+**Q: 代码疑似被 IDE 旧标签页覆盖（功能异常退化）**
+A: PyCharm 等编辑器会把文件内容缓存在标签页中，外部修改磁盘后旧缓冲区保存一次就会覆盖新代码。
+检查/恢复方法（项目已建 git 快照）：
+```bash
+git status                    # 若 terrain/*.py 显示红色 modified 即被覆盖
+git checkout -- terrain/      # 一键恢复到最近提交的验证版本
+git log --oneline             # 查看历史提交
+```
+预防：外部工具修改代码后，在 IDE 中执行 File → Reload All from Disk。
+
 **Q: 提示 "请先用 v6.3 重训 (12通道)"**
 A: 检查点版本不匹配。用 `checkpoints/` 中现成的权重，或按 TECHNICAL.md 重训。
 
