@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# 大文件数据 (可重新获取/可再生, 不入库)
+terrain/data/
+terrain/checkpoints/
+terrain/cache/
+terrain/output/
+
+# 虚拟环境与 IDE
+.venv/
+.idea/
