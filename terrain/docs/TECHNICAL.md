@@ -202,16 +202,26 @@ T = 27 − 0.42·|lat| − 6.5·(elev/1000) − 22·clip((|lat|−55)/35, 0, 1)�
 
 | 文件 | 用途 |
 |------|------|
-| `plate_sim.py` | 板块演化模拟 **v3.0 超大陆旋回**（缓存 `cache/plate_sim_v3_T512_seed*.npz`） |
-| `tectonics.py` | Bird 2003 真实边界 → 构造条件场（训练用，缓存 `cache/tect_cache_*.npz`） |
-| `terrain_engine.py` | 归一化/气候/侵蚀/后处理/网络/训练 + v6.6 修复层 + v7.0 洋流/季风/冰盖 |
-| `generate_world.py` | 世界生成主入口（管线编排 + 渲染 + 产物落盘） |
-| `geo_context.py` | **新增 v7.0**：`WorldGeoContext` 单例 —— DEM 懒加载 / 坐标转换 / 双线性查询 / KPI 统计 / 多边形裁切 |
-| `visualize_context.py` | **新增 v7.0**：4 面板 PNG + 单文件离线交互 HTML 报告（探针点/多边形/剖面联动） |
-| `rerender.py` | 仅重渲染（不动 DEM） |
-| `batch_gen.py` | 批量生成多种子地图（检验用） |
-| `analyze_worlds.py` | 七大地理维度指标 vs 真实地球同口径分析（输出 analysis_results.json） |
-| `make_montage.py` | 真实地球(同风格渲染)+N 种子对比拼图 |
+| `terrain/plate_sim.py` | **（兼容薄封装）** 转发到 `terrain/core/plate_sim.py`，勿直接编辑 |
+| `terrain/tectonics.py` | **（兼容薄封装）** 转发到 `terrain/core/tectonics.py`，勿直接编辑 |
+| `terrain/terrain_engine.py` | **（兼容薄封装）** 转发到 `terrain/core/terrain_engine.py`，勿直接编辑 |
+| `terrain/generate_world.py` | **（兼容薄封装）** 转发到 `terrain/core/generate_world.py`，勿直接编辑 |
+| `terrain/geo_context.py` | **（兼容薄封装）** 转发到 `terrain/core/geo_context.py`，勿直接编辑 |
+| `terrain/visualize_context.py` | **（兼容薄封装）** 转发到 `terrain/core/visualize_context.py`，勿直接编辑 |
+| `terrain/rerender.py` | **（兼容薄封装）** 转发到 `terrain/core/rerender.py`，勿直接编辑 |
+| `terrain/batch_gen.py` | **（兼容薄封装）** 转发到 `terrain/scripts/batch_gen.py`，勿直接编辑 |
+| `terrain/analyze_worlds.py` | **（兼容薄封装）** 转发到 `terrain/scripts/analyze_worlds.py`，勿直接编辑 |
+| `terrain/make_montage.py` | **（兼容薄封装）** 转发到 `terrain/scripts/make_montage.py`，勿直接编辑 |
+| **`terrain/core/plate_sim.py`** | 【真实实现】板块演化模拟 **v3.0 超大陆旋回**（缓存 `cache/plate_sim_v3_T512_seed*.npz`） |
+| **`terrain/core/tectonics.py`** | 【真实实现】Bird 2003 真实边界 → 构造条件场（训练用，缓存 `cache/tect_cache_*.npz`） |
+| **`terrain/core/terrain_engine.py`** | 【真实实现】归一化/气候/侵蚀/后处理/网络/训练 + v6.6 修复层 + v7.0 洋流/季风/冰盖 |
+| **`terrain/core/generate_world.py`** | 【真实实现】世界生成主入口（管线编排 + 渲染 + 产物落盘） |
+| **`terrain/core/geo_context.py`** | 【真实实现 · 新增 v7.0】`WorldGeoContext` 单例 —— DEM 懒加载 / 坐标转换 / 双线性查询 / KPI 统计 / 多边形裁切 |
+| **`terrain/core/visualize_context.py`** | 【真实实现 · 新增 v7.0】4 面板 PNG + 单文件离线交互 HTML 报告（探针点/多边形/剖面联动） |
+| **`terrain/core/rerender.py`** | 【真实实现】仅重渲染（不动 DEM） |
+| **`terrain/scripts/batch_gen.py`** | 【真实实现】批量生成多种子地图（检验用，进程池并行） |
+| **`terrain/scripts/analyze_worlds.py`** | 【真实实现】七大地理维度指标 vs 真实地球同口径分析（输出 analysis_results.json） |
+| **`terrain/scripts/make_montage.py`** | 【真实实现】真实地球(同风格渲染)+N 种子对比拼图 |
 | `tests/test_visualize_context.py` | pytest 33 项：参数解析 / 单例缓存 / figure 冒烟 / latlon 往返 / CLI 主流程 / Protocol 合规 |
 | `data/` | ETOPO1 全球 DEM、PB2002 板块边界（重训数据源，生成世界不需要） |
 | `checkpoints/` | GAN 权重 `best_terrain_gan_v5.pth`（12 通道条件 GAN，UNet in_ch=12, base=32） |
@@ -585,6 +595,8 @@ T = 27 − 0.42·|lat| − 6.5·(elev/1000) − 22·clip((|lat|−55)/35, 0, 1)�
 列 c ∈ [0, S−1]  →  lon(c) = −180 + (c + 0.5) × 360/S     (经度 0° 在 c≈S/2)
 ```
 
+**常见坑：r=0 行是北半球 (lat=+90°−half_pixel)**。NumPy 数组的「从上到下」正好对应地球「从北极到南极」：`.dem[0, :]` 是最靠近北极点的一行（北纬 90° 减去半个像素），`.dem[S-1, :]` 是最靠近南极点的一行（南纬 −90° 加上半个像素）。如果你把 `r=0` 当成南极，南北极会完全搞反，雪盖/苔原跑到赤道、热带雨林冻成冰原。可视化时 `plt.imshow(dem)` 默认原点在左上角，因此地图自动「上北下南」是正确的，不用额外 `np.flipud`。
+
 ### 16.4 关键 API
 
 | API | 签名 | 说明 |
@@ -672,13 +684,16 @@ T = 27 − 0.42·|lat| − 6.5·(elev/1000) − 22·clip((|lat|−55)/35, 0, 1)�
 ### 18.1 世界生成
 
 ```python
-# generate_world.py
+# terrain/core/generate_world.py
 def generate_world(
     seed: int = 0,
     size_px: int = 2048,           # 2048 或 4096
     ckpt_path: str | None = None,  # 覆盖默认 checkpoints/best_terrain_gan_v5.pth
     output_dir: str | None = None, # 覆盖默认 terrain/output/
     skip_gan: bool = False,        # 只跑到骨架 (skeleton.png)，不做 GAN 细化
+    tect_res: int = 512,           # 板块模拟分辨率（默认 512，与缓存匹配；修改时需与 TECHNICAL §2 一致）
+    out_png: str | None = None,    # 渲染图 world_map.png 输出路径；空时写 terrain/output/world_map.png
+    out_npy: str | None = None,    # DEM world_dem.npy 输出路径；空时写 terrain/output/world_dem.npy
 ) -> dict[str, Any]:
     """主入口：执行完整管线，返回全局 KPI + 产物路径。"""
     # 返回 {"seed","size","dem_path","map_path","skeleton_path","summary_stats":{...}}
@@ -747,7 +762,9 @@ actual_path, ctx = build_html_report(
 
 ## 19. CLI 参数与配置汇总（全部脚本 × 默认值 × 说明）
 
-### 19.1 `python terrain/generate_world.py` 主入口
+> 兼容薄封装：`python terrain/xxx.py` 仍可使用（re-export 一跳 + 自动注入路径）；推荐直接跑 terrain/core/ 或 terrain/scripts/ 下的真实脚本便于调试堆栈。
+
+### 19.1 `python terrain/core/generate_world.py` 主入口
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
@@ -758,7 +775,7 @@ actual_path, ctx = build_html_report(
 | `--skip-gan` | `False` | 只生成骨架（调试板块/造山带，跳过 GAN 的 40 秒 ~ 2 分钟） |
 | `--no-render` | `False` | 只算 DEM 不渲染 world_map.png（批量生成时提速） |
 
-### 19.2 `python terrain/visualize_context.py` 可视化 + HTML 报告
+### 19.2 `python terrain/core/visualize_context.py` 可视化 + HTML 报告
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
@@ -776,7 +793,7 @@ actual_path, ctx = build_html_report(
 | **`--html-query-size`** | `512` | HTML JS 悬停查询网格分辨率（越大越精确；建议 512/768/1024） |
 | **`--no-png`** | `False` | 只出 HTML 跳过 PNG（纯 HTML 场景提速 60%+） |
 
-### 19.3 `python terrain/plate_sim.py` 板块演化（单独调试）
+### 19.3 `python terrain/core/plate_sim.py` 板块演化（单独调试）
 
 | 参数 | 默认 | 说明 |
 |------|------|------|
@@ -791,11 +808,11 @@ actual_path, ctx = build_html_report(
 
 | 脚本 | 常用参数 | 说明 |
 |------|---------|------|
-| `rerender.py` | `--dem` / `--size` / `--out` | 仅重渲染 world_map.png（不重算 DEM；调渲染参数时反复用） |
-| `batch_gen.py` | `--seeds 1 2 3 4 5 ...` / `--size 2048` | 批量生成多种子；内部进程池并行，适合回归测试基线 |
-| `analyze_worlds.py` | `--glob "terrain/output/world_dem_seed*.npy"` / `--out analysis_results.json` | 七大维度 45+ 项地理指标 × 与 ETOPO1 同口径对比 |
-| `make_montage.py` | `--seeds 1 2 3 4` / `--cols 3` | 真实地球 (ETOPO1 同风格渲染) + N 种子并排对比拼图 |
-| `terrain_engine.py` 训练 | `--data ./data/ETOPO1...grd` / `--epochs 120` / `--batch 16` | 删除 checkpoint 后自动进入训练模式；需要 data/ ETOPO1 + PB2002 |
+| `terrain/core/rerender.py` | `--dem` / `--size` / `--out` | 仅重渲染 world_map.png（不重算 DEM；调渲染参数时反复用） |
+| `terrain/scripts/batch_gen.py` | `--seeds 1 2 3 4 5 ...` / `--size 2048` | 批量生成多种子；内部进程池并行，适合回归测试基线 |
+| `terrain/scripts/analyze_worlds.py` | `--glob "terrain/output/world_dem_seed*.npy"` / `--out analysis_results.json` | 七大维度 45+ 项地理指标 × 与 ETOPO1 同口径对比 |
+| `terrain/scripts/make_montage.py` | `--seeds 1 2 3 4` / `--cols 3` | 真实地球 (ETOPO1 同风格渲染) + N 种子并排对比拼图 |
+| `terrain/core/terrain_engine.py` 训练 | `--data ./data/ETOPO1...grd` / `--epochs 120` / `--batch 16` | 删除 checkpoint 后自动进入训练模式；需要 data/ ETOPO1 + PB2002 |
 
 ### 19.5 环境变量（可选 override，一般不用）
 

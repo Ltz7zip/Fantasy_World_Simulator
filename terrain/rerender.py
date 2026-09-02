@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
-"""兼容薄封装：``from rerender import …``（旧无包前缀导入）继续可用。
+"""兼容薄封装 · ⚠ 勿直接编辑 · 真实实现见 terrain/core/ 或 terrain/scripts/
 
-真实实现已搬迁到 terrain/core/rerender.py。本模块先 ``import terrain``
-触发 sys.path 注入 terrain/core，再执行转发 import 让旧名字映射到新文件。
+模块用途：让「from rerender import …」旧无包前缀导入 & 直接 `python terrain/rerender.py`
+继续可用。本模块仅做两件事：(1) import terrain 触发路径注入 terrain/core；
+(2) 从 terrain.core.rerender 做 ``*`` re-export。
+维护者注意：请只编辑 terrain/core/ 与 terrain/scripts/ 下的真实文件。
 """
 import terrain  # noqa: F401
 from terrain.core.rerender import *  # noqa: F401,F403
