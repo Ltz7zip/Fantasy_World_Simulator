@@ -2,6 +2,23 @@
 __pycache__/
 *.pyc
 
+# 环境变量与凭据（本地配置，绝对不入库）
+.env
+.env.*
+!.env.example
+
+# 前端依赖
+node_modules/
+# 前端构建产物（如需要单独发布 build 可按需取消注释）
+# dist/
+# build/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
 # 大文件数据 (可重新获取/可再生, 不入库)
 terrain/data/
 terrain/checkpoints/
@@ -10,9 +27,19 @@ terrain/output/
 
 # 虚拟环境与 IDE
 .venv/
+venv/
+env/
 .idea/
 .vscode/
-.DS_Store
+*.swp
+*.swo
+*~
+
+# 日志
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # TRAE 工作区私有目录（.trae/skills 为本地 Skill 定义，不跨机器共享）
 .trae/
