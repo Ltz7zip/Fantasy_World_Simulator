@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>神经网络随机地图 vs 真实地球 — 地理差距分析报告</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f6f8;
+    color: #1a1b1c;
+    line-height: 1.7;
+  }
+  .container { max-width: 960px; margin: 0 auto; padding: 32px 20px; }
+  h1 {
+    font-size: 26px; font-weight: 700; margin-bottom: 8px;
+    background: linear-gradient(135deg, #1e3a5f, #2d6a9f);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .subtitle { color: #6b7280; font-size: 14px; margin-bottom: 32px; }
+  h2 {
+    font-size: 20px; font-weight: 700; margin: 40px 0 16px;
+    padding-left: 12px; border-left: 4px solid #2d6a9f;
+  }
+  h3 { font-size: 16px; font-weight: 600; margin: 24px 0 10px; color: #1e3a5f; }
+  p { margin-bottom: 12px; font-size: 14.5px; color: #333; }
+  .chart-box {
+    background: #fff; border-radius: 12px; padding: 20px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.06); margin: 20px 0;
+  }
+  .chart { width: 100%; height: 420px; }
+  .chart-tall { height: 480px; }
+  .summary-card {
+    background: #fff; border-radius: 12px; padding: 24px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.06); margin-bottom: 24px;
+  }
+  .summary-card p { font-size: 15px; }
+  .tag {
+    display: inline-block; padding: 2px 10px; border-radius: 12px;
+    font-size: 12px; font-weight: 600; margin-right: 6px;
+  }
+  .tag-good { background: #dcfce7; color: #166534; }
+  .tag-mid { background: #fef9c3; color: #854d0e; }
+  .tag-bad { background: #fee2e2; color: #991b1b; }
+  table {
+    width: 100%; border-collapse: collapse; margin: 16px 0;
+    font-size: 13.5px; background: #fff; border-radius: 8px; overflow: hidden;
+  }
+  th { background: #1e3a5f; color: #fff; padding: 10px 12px; text-align: left; font-weight: 600; }
+  td { padding: 9px 12px; border-bottom: 1px solid #e5e7eb; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #f8fafc; }
+  .dim-section {
+    background: #fff; border-radius: 12px; padding: 24px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.06); margin: 20px 0;
+  }
+  .dim-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .dim-num {
+    width: 32px; height: 32px; border-radius: 50%; background: #2d6a9f;
+    color: #fff; display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 15px; flex-shrink: 0;
+  }
+  .dim-title { font-size: 17px; font-weight: 700; color: #1e3a5f; }
+  .compare-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 14px 0; }
+  .compare-box { padding: 14px; border-radius: 8px; font-size: 13.5px; }
+  .compare-gen { background: #eff6ff; border: 1px solid #bfdbfe; }
+  .compare-real { background: #f0fdf4; border: 1px solid #bbf7d0; }
+  .compare-box strong { display: block; margin-bottom: 6px; font-size: 13px; }
+  .compare-gen strong { color: #1d4ed8; }
+  .compare-real strong { color: #15803d; }
+  .footer { margin-top: 48px; padding-top: 20px; border-top: 1px solid #e5e7eb; color: #9ca3af; font-size: 12px; }
+  @media (max-width: 640px) {
+    .compare-row { grid-template-columns: 1fr; }
+    h1 { font-size: 22px; }
+  }
+</style>
+</head>
+<body>
+<div class="container">
+
+<h1>神经网络随机地图 vs 真实地球</h1>
+<p class="subtitle">基于 10 张生成地图（seed 1–10）的视觉分析 + 生成管线代码通读 + 项目自检指标交叉验证 · 2026-09</p>
+
+<div class="summary-card">
+  <p><strong>核心结论：</strong>该生成器（板块演化前向模拟 + 12 通道条件 GAN + 气候因果链渲染）在<strong>统计校准层面</strong>已相当出色——陆地占比、海拔直方图、海洋深度结构、陆架比例等关键指标与 ETOPO1 真实地球误差普遍小于 10%。但在<strong>地貌形态的"真实感"</strong>上仍有系统性差距：山脉碎而非带、大陆圆而非拼、河流散而非汇、半岛缺、裂谷无、季风洋流未建模。简而言之：<strong>"统计上像地球，形态上像另一个星球"</strong>。</p>
+</div>
+
+<h2>一、各维度差距总览</h2>
+
+<div class="chart-box">
+  <div id="radar" class="chart chart-tall"></div>
+</div>
+
+<div class="chart-box">
+  <div id="bar" class="chart"></div>
+</div>
+
+<h2>二、分维度详细分析</h2>
+
+<!-- 维度1 -->
+<div class="dim-section">
+  <div class="dim-header">
+    <div class="dim-num">1</div>
+    <div class="dim-title">大陆轮廓与整体结构 <span class="tag tag-bad">差距较大</span></div>
+  </div>
+  <div class="compare-row">
+    <div class="compare-box compare-gen">
+      <strong>生成地图特征</strong>
+      大陆基底为"2–5 个圆盘并集"，经域扭曲和海岸分形后仍偏圆润块状；海岸线平滑弯曲，缺乏尖锐岬角和深入内陆的海湾；大陆之间多为宽阔海洋，缺乏地峡/陆桥连接。
+    </div>
+    <div class="compare-box compare-real">
+      <strong>真实地球特征</strong>
+      大陆是板块长期漂移、碰撞、裂解的拼接产物，具有复杂的缝合边界；大西洋沿岸平滑（被动边缘）、太平洋沿岸崎岖（主动边缘）；存在大量半岛（印度、阿拉伯、斯堪的纳维亚、佛罗里达）、陆间海（地中海、加勒比、波罗的海）和地峡（巴拿马、苏伊士）。
+    </div>
+  </div>
+  <p><strong>根因：</strong>板块模拟的大陆播种是随机圆盘，虽有 85% 半球先验，但没有"超大陆旋回"（聚合→裂解→再聚合）的历史遗产。真实地球的大陆形态很大程度上由泛大陆（Pangaea）裂解的"拼图边缘"决定——非洲与南美洲的吻合海岸线就是最直接的证据。生成器的 12 个板块独立旋转，大陆之间没有"曾经相连"的记忆。</p>
+  <p><strong>具体缺失：</strong>印度型撞入半岛、阿拉伯半岛、斯堪的纳维亚半岛、下加利福尼亚半岛、佛罗里达半岛；地中海型陆间海、波罗的海型冰蚀海湾、哈德逊湾型大陆内部海湾；巴拿马地峡型陆桥。</p>
+</div>
+
+<!-- 维度2 -->
+<div class="dim-section">
+  <div class="dim-header">
+    <div class="dim-num">2</div>
+    <div class="dim-title">山脉与造山带 <span class="tag tag-bad">差距很大</span></div>
+  </div>
+  <div class="compare-row">
+    <div class="compare-box compare-gen">
+      <strong>生成地图特征</strong>
+      山脉呈斑块状/簇状分布，白色雪盖区域零散不连续；虽有 v6.6 板内造山修复层添加 1–2 条板内山，但整体山带短而碎；项目自检 belt_share（长宽比&gt;3 的山地占比）仅 19%。
+    </div>
+    <div class="compare-box compare-real">
+      <strong>真实地球特征</strong>
+      造山带是绵延数千公里的连续带状：安第斯 7000km、落基 4800km、喜马拉雅-阿尔卑斯横贯欧亚 10000km+、大分水岭 3500km；belt_share 约 84%；高峰沿主脊线排列，有清晰的主脊-支脉-山前丘陵层级。
+    </div>
+  </div>
+  <p><strong>根因：</strong>造山带来自碰撞边界的历史累积 orog 场，但碰撞边界在 512 格分辨率下本身就是短弧段，经域扭曲后进一步破碎。骨架细化层的山脉公式 <code>700m × 构造场 × 宽度变化场 × ridged_fbm²</code> 虽然增加了分支和宽度变化，但基底构造场是碎的，无法凭空生成长带。v6.6 的板内造山修复只加 1–2 条，数量和长度都不足。</p>
+  <p><strong>视觉证据：</strong>10 张地图中没有任何一张出现类似安第斯那样纵贯大陆西海岸的连续山带；seed8 中部有一条较明显的东西向山带，但也仅占大陆宽度的一小部分且中断明显。</p>
+</div>
+
+<!-- 维度3 -->
+<div class="dim-section">
+  <div class="dim-header">
+    <div class="dim-num">3</div>
+    <div class="dim-title">盆地与洼地 <span class="tag tag-mid">差距中等偏大</span></div>
+  </div>
+  <div class="compare-row">
+    <div class="compare-box compare-gen">
+      <strong>生成地图特征</strong>
+      有山间盆地（-2000m）、腹地盆地（-1600m）和前陆盆地（-620m）三类；盆地形态偏圆，与山脉的空间配对不够紧密；内陆干旱盆地（黄褐色）可见但规模偏小。
+    </div>
+    <div class="compare-box compare-real">
+      <strong>真实地球特征</strong>
+      盆地成因多样：前陆盆地（恒河平原、潘帕斯，紧贴造山带）、裂谷盆地（东非大裂谷、贝加尔湖，线性洼地+湖泊链）、克拉通盆地（刚果盆地、塔里木，古老陆壳内部）、弧后盆地（日本海、南海，岛弧后方）；盆地与造山带严格成对出现。
+    </div>
+  </div>
+  <p><strong>关键缺失：</strong>裂谷盆地完全缺失——没有东非大裂谷型的线性洼地、火山链和串珠状湖泊；弧后盆地缺失——岛弧后方应为浅海/半深海，生成器的岛弧直接面向深海；前陆盆地与造山带的配对不够紧密，真实前陆盆地（如恒河平原）紧贴喜马拉雅南麓，生成器的 -620m 前陆信号较弱。</p>
+</div>
+
+<!-- 维度4 -->
+<div class="dim-section">
+  <div class="dim-header">
+    <div class="dim-num">4</div>
+    <div class="dim-title">海洋地理：洋中脊、海沟与海底地形 <span class="tag tag-mid">差距中等</span></div>
+  </div>
+  <div class="compare-row">
+    <div class="compare-box compare-gen">
+      <strong>生成地图特征</strong>
+      洋中脊（浅色蜿蜒带）清晰可辨，但形态偏连续弯曲，缺乏转换断层的直角错位；海沟（深蓝色窄带）形态明显但部分呈阶梯状/方块状（像素化痕迹）；深海平原偏均匀；海底高原/洋底高原缺失。
+    </div>
+    <div class="compare-box compare-real">
+      <strong>真实地球特征</strong>
+      洋中脊是直线段+转换断层切割的"锯齿状"（东太平洋海隆接近直线、大西洋中脊有大量转换断层错位）；海沟是平滑弧形（马里亚纳、爪哇、秘鲁-智利）；深海平原有沉积厚度变化、海山链和断裂带；存在大型洋底高原（翁通爪哇、凯尔盖朗）。
+    </div>
+  </div>
+  <p><strong>亮点：</strong>v2.2 海洋直方图标定是生成器的强项——洋壳年龄排名→地球开阔洋深度分位映射，使平均洋深（-3960m vs 地球 -3692m）、洋中脊侧翼带占比（35.1% vs 35.6%）、深海平原占比（51.9% vs 51.9%）几乎精确对齐。陆架修复也从 0.7% 提升到 5.9%（地球 7.1%）。</p>
+  <p><strong>问题：</strong>统计对齐了，但空间形态没对齐。洋中脊的"直线段+转换断层"格局来自板块扩张的几何特性，生成器的洋中脊位置由离散边界（ridge mask）决定，但离散边界在域扭曲后变成了连续曲线，转换断层的直角特征被抹平。</p>
+</div>
+
+<!-- 维度5 -->
+<div class="dim-section">
+  <div class="dim-header">
+    <div class="dim-num">5</div>
+    <div class="dim-title">半岛、岛屿与群岛 <span class="tag tag-bad">差距较大</span></div>
+  </div>
+  <div class="compare-row">
+    <div class="compare-box compare-gen">
+      <strong>生成地图特征</strong>
+      岛弧链（俯冲带大陆侧 180–340km 盖章链状群岛）和热点岛链是亮点，岛屿数量从 23 提升到 77+；但半岛几乎缺失；岛屿类型单一（主要是火山岛弧岛和热点岛）；大陆岛（陆架上的岛屿）偏少。
+    </div>
+    <div class="compare-box compare-real">
+      <strong>真实地球特征</strong>
+      岛屿类型丰富：大陆岛（格陵兰、新几内亚、马达加斯加、不列颠——陆架被海淹没）、火山岛（岛弧岛如日本、菲律宾；热点岛如夏威夷）、珊瑚岛/环礁（马尔代夫、太平洋岛群）、三角洲岛（恒河三角洲、湄公河）；群岛有复杂海陆交错（马来群岛、加勒比）。
+    </div>
+  </div>
+  <p><strong>关键缺失：</strong>大型半岛（前面已述）；大陆岛——生成器的陆架虽修复到 6%，但陆架上的岛屿不够，真实地球的不列颠群岛、新西兰南岛、马达加斯加都是大陆岛；珊瑚岛/环礁完全缺失（气候模型中没有珊瑚礁生态带）；群岛的复杂交错格局（如马来群岛的海陆迷宫）未出现。</p>
+</div>
+
+<!-- 维度6 -->
+<div class="dim-section">
+  <div class="dim-header">
+    <div class="dim-num">6</div>
+    <div class="dim-title">水系与水文 <span class="tag tag-bad">差距很大</span></div>
+  </div>
+  <div class="compare-row">
+    <div class="compare-box compare-gen">
+      <strong>生成地图特征</strong>
+      有 D8 河网和干流河谷雕刻，河流可见；但最大流域仅占陆地 0.6%（地球亚马逊 4.4%）；中型流域 133 个（地球 100，数量够但规模小）；大型湖泊偏少；内流区少；河流下游曲流不明显。
+    </div>
+    <div class="compare-box compare-real">
+      <strong>真实地球特征</strong>
+      巨型河流（亚马逊 705 万 km²、刚果 370 万、密西西比 298 万、尼罗河 303 万）需要"大型内陆盆地+一侧高山+一侧出海口"的大陆形态；大型湖泊（里海 37 万 km²、贝加尔湖、五大湖 24.5 万）；大量内流区（塔里木、咸海流域、大盆地）；大河下游有明显曲流和辫状水系。
+    </div>
+  </div>
+  <p><strong>根因：</strong>巨型流域的瓶颈不在河网算法，而在大陆形态。生成器的大陆偏圆、山脉偏碎，难以形成"水往一处汇"的汇聚型盆地。干流雕刻虽然下切了亚马逊级河谷，但流域面积上不去——没有足够大的汇水盆地。项目文档也明确承认这是"需大陆形态层面改造"的剩余差距。</p>
+  <p><strong>湖泊问题：</strong>裂谷湖链（东非大裂谷的维多利亚、坦噶尼喀、马拉维）完全缺失；冰蚀湖群（加拿大、芬兰的数万湖泊）在高纬有一些但形态偏随机；里海型内陆海（大型封闭咸水湖）未出现。</p>
+</div>
+
+<!-- 维度7 -->
+<div class="dim-section">
+  <div class="dim-header">
+    <div class="dim-num">7</div>
+    <div class="dim-title">气候与植被 <span class="tag tag-mid">差距中等偏大</span></div>
+  </div>
+  <div class="compare-row">
+    <div class="compare-box compare-gen">
+      <strong>生成地图特征</strong>
+      纬向气候带基本正确（赤道雨林→副热带荒漠→温带森林→极地苔原/冰盖）；迎风坡地形雨和雨影荒漠可涌现；但热带雨林偏少（降水模型偏干）；季风系统缺失；洋流影响缺失。
+    </div>
+    <div class="compare-box compare-real">
+      <strong>真实地球特征</strong>
+      气候系统复杂：季风（南亚、东亚、西非——海陆热力差异驱动的季节性风向反转）、洋流（北大西洋暖流使欧洲冬季偏暖 10°C+、秘鲁寒流造成阿塔卡马沙漠、本格拉寒流造成纳米布沙漠）、ENSO 年际振荡；热带雨林集中在亚马逊、刚果、东南亚三个盆地。
+    </div>
+  </div>
+  <p><strong>根因：</strong>温度场只有纬度+海拔+极地放大三项，没有海洋环流；降水场用固定盛行风向（30°–60° 西风、其余信风），没有季节性风向反转（季风）。这导致：①非洲撒哈拉的干旱程度被低估（没有加那利寒流强化）；②欧洲西部的温暖湿润被低估（没有北大西洋暖流）；③南亚/东南亚的季风雨林无法形成；④热带雨林整体偏少。</p>
+</div>
+
+<!-- 维度8 -->
+<div class="dim-section">
+  <div class="dim-header">
+    <div class="dim-num">8</div>
+    <div class="dim-title">极地与冰盖 <span class="tag tag-mid">差距中等</span></div>
+  </div>
+  <div class="compare-row">
+    <div class="compare-box compare-gen">
+      <strong>生成地图特征</strong>
+      极地有雪盖和海冰（64.5°±2.5°）；但极地陆地冰盖偏碎片化，白色雪盖中穿插大量棕褐色裸地/苔原；冰盖下的地形纹理仍可见（应为冰盖抹平）；海冰边缘偏规则。
+    </div>
+    <div class="compare-box compare-real">
+      <strong>真实地球特征</strong>
+      南极是连续大陆冰盖（1400 万 km²，平均厚度 2.3km），完全覆盖下伏地形；格陵兰近连续冰盖（171 万 km²）；海冰有季节变化和复杂边缘形态；冰盖本身是穹状地形，不是"地形+雪盖"的叠加。
+    </div>
+  </div>
+  <p><strong>根因：</strong>渲染层用"纬度雪线+温度雪线"的阈值方式给高海拔/高纬地区覆盖白色，而不是模拟冰盖的积累-消融动力学。真实冰盖会动态扩张、侵蚀下伏地形（U 型谷、峡湾），并在边缘形成冰架和冰山。生成器的极地陆地如果本身地形破碎（多山），雪盖就会沿山峰分布，呈现碎片化而非连续冰盖。</p>
+</div>
+
+<!-- 维度9 -->
+<div class="dim-section">
+  <div class="dim-header">
+    <div class="dim-num">9</div>
+    <div class="dim-title">构造格局与板块历史 <span class="tag tag-bad">差距较大</span></div>
+  </div>
+  <div class="compare-row">
+    <div class="compare-box compare-gen">
+      <strong>生成地图特征</strong>
+      12 个板块随机旋转轴和角速度，450 Myr 演化；有半球先验（85% 大陆偏向随机陆半球）；但板块格局偏随机，缺乏历史遗产；转换断层的全球格局不明显；三联点、微板块/地体拼贴缺失。
+    </div>
+    <div class="compare-box compare-real">
+      <strong>真实地球特征</strong>
+      板块格局有清晰的历史遗产：泛大陆裂解→大西洋张开（洋中脊居中、两侧大陆海岸线吻合）→环太平洋俯冲带（太平洋缩小）→特提斯洋闭合形成喜马拉雅-阿尔卑斯造山带；存在三联点（阿法尔三角、复活节岛）、微板块（胡安·德富卡、斯科舍）、地体拼贴（北美西部）。
+    </div>
+  </div>
+  <p><strong>根因：</strong>450 Myr 的演化时间足够产生构造现象，但初始条件是随机的，没有设定"先聚合超大陆再裂解"的阶段。真实地球的大西洋型被动大陆边缘（平滑海岸+宽陆架）和太平洋型主动大陆边缘（崎岖海岸+窄陆架+海沟）的鲜明对比，在生成器中不够鲜明——因为生成器的大陆边缘类型主要由当前是否有俯冲带决定，而不是"这个边缘是裂解形成的还是俯冲形成的"历史。</p>
+</div>
+
+<!-- 维度10 -->
+<div class="dim-section">
+  <div class="dim-header">
+    <div class="dim-num">10</div>
+    <div class="dim-title">统计校准与微观纹理 <span class="tag tag-good">差距很小</span></div>
+  </div>
+  <p>这是生成器最出色的部分。v6.6 的多重校准层使以下指标与真实地球高度一致：</p>
+  <table>
+    <tr><th>指标</th><th>生成器</th><th>真实地球</th><th>误差</th></tr>
+    <tr><td>陆地占比</td><td>~30%</td><td>29.2%</td><td>&lt;1pp</td></tr>
+    <tr><td>平均陆地海拔</td><td>807m</td><td>792m</td><td>1.9%</td></tr>
+    <tr><td>平均海洋深度</td><td>-3960m</td><td>-3692m</td><td>7.3%</td></tr>
+    <tr><td>平原占比（0–200m）</td><td>28.1%</td><td>28.0%</td><td>&lt;0.1pp</td></tr>
+    <tr><td>陆架占比</td><td>5.9%</td><td>7.1%</td><td>1.2pp</td></tr>
+    <tr><td>深海平原占比</td><td>51.9%</td><td>51.9%</td><td>≈0</td></tr>
+    <tr><td>洋中脊侧翼带占比</td><td>35.1%</td><td>35.6%</td><td>0.5pp</td></tr>
+    <tr><td>山地-俯冲带耦合百分位</td><td>0.58</td><td>0.53</td><td>9.4%</td></tr>
+  </table>
+  <p>海岸分形维数 D≈1.3 也在真实地球范围（1.2–1.4）内。GAN 生成的微观地形纹理（山体阴影、坡面细节）在视觉上相当自然，PSD 仅"略平滑"。</p>
+</div>
+
+<h2>三、差距根源总结</h2>
+
+<div class="dim-section">
+  <p>所有差距可归结为三个层面的瓶颈：</p>
+  <h3>1. 大陆形态层面（最根本）</h3>
+  <p>山脉碎、流域小、半岛缺、裂谷无，根源都在于大陆基底形态。圆盘播种+域扭曲产生的是"blob 大陆"，而真实大陆是板块拼接的"拼图大陆"。需要引入超大陆旋回（先聚合后裂解）和大陆碰撞的地体拼贴机制，才能产生缝合带、裂谷、被动边缘等真实形态。</p>
+  <h3>2. 气候系统层面</h3>
+  <p>当前气候是"纬度+地形"的静态模型，缺少海洋环流和季风动力学。洋流对气候的重塑作用巨大（欧洲因北大西洋暖流而温暖、南美西岸因秘鲁寒流而干旱），不建模洋流就无法复现这些格局。</p>
+  <h3>3. 时间尺度层面</h3>
+  <p>450 Myr 的板块演化足以产生构造地形，但侵蚀、沉积、海平面变化、冰期-间冰期旋回等地表过程的时间累积不足。真实地貌是构造抬升与侵蚀剥蚀长期博弈的结果，生成器的水力侵蚀（15 万水滴）和干流雕刻是后处理"贴上去"的，而非与构造协同演化。</p>
+</div>
+
+<h2>四、改进方向建议</h2>
+<div class="dim-section">
+  <table>
+    <tr><th>优先级</th><th>改进方向</th><th>预期效果</th></tr>
+    <tr><td>高</td><td>引入超大陆旋回：先聚合形成超大陆，再裂解，保留"拼图边缘"</td><td>大陆轮廓真实感、被动/主动边缘对比、裂谷盆地</td></tr>
+    <tr><td>高</td><td>造山带延展算法：碰撞边界沿走向外推+分支连接，生成连续山带</td><td>belt_share 从 19%→60%+，安第斯型纵贯山带</td></tr>
+    <tr><td>高</td><td>裂谷系统：大陆离散边界保留线性洼地+火山链+串珠湖</td><td>东非大裂谷型地貌、贝加尔湖型深湖</td></tr>
+    <tr><td>中</td><td>简化海洋环流：温盐环流+表层洋流对沿岸气候的修正</td><td>欧洲变暖、秘鲁寒流干旱、雨林分布修正</td></tr>
+    <tr><td>中</td><td>季风系统：海陆热力差异驱动的季节性风向反转</td><td>南亚/东南亚季风雨林、西非季风</td></tr>
+    <tr><td>中</td><td>半岛生成：碰撞边界+侵蚀+海平面变化复合建模</td><td>印度/阿拉伯/斯堪的纳维亚型半岛</td></tr>
+    <tr><td>低</td><td>冰盖动力学：积累-消融模型替代阈值雪盖</td><td>连续极地冰盖、冰架、峡湾</td></tr>
+    <tr><td>低</td><td>珊瑚礁带：热带浅海+温暖水域标记环礁/珊瑚岛</td><td>马尔代夫/太平洋环礁型岛屿</td></tr>
+  </table>
+</div>
+
+<div class="footer">
+  <p>分析依据：10 张生成地图（seed1–10，2048×2048）视觉检查 · 项目源码（plate_sim.py / terrain_engine.py / generate_world.py / analyze_worlds.py）通读 · TECHNICAL.md v6.6 自检指标 · 与 ETOPO1(Ice) + PB2002 真实地球同口径对比</p>
+</div>
+
+</div>
+
+<script>
+// 雷达图：各维度与真实地球的接近度（0-10，10=最接近真实）
+var radarChart = echarts.init(document.getElementById('radar'));
+radarChart.setOption({
+  backgroundColor: 'transparent',
+  title: {
+    text: '各维度与真实地球的接近度评分',
+    subtext: '10 分 = 与真实地球无显著差异；基于视觉分析+项目自检指标综合评定',
+    left: 'center',
+    textStyle: { fontSize: 15, fontWeight: 600, color: '#1a1b1c' },
+    subtextStyle: { fontSize: 11, color: '#6b7280' }
+  },
+  tooltip: {
+    triggerOn: 'click',
+    renderMode: 'richText',
+    confine: true,
+    textStyle: { fontSize: 11, lineHeight: 14 },
+    padding: [6, 8]
+  },
+  legend: {
+    top: 56,
+    data: ['生成地图', '真实地球（参考线）'],
+    itemWidth: 14, itemHeight: 8,
+    textStyle: { fontSize: 11, color: '#6b7280' }
+  },
+  radar: {
+    center: ['50%', '58%'],
+    radius: '62%',
+    indicator: [
+      { name: '统计校准\n(陆地/海拔/深度)', max: 10 },
+      { name: '海岸分形\n与岛屿数量', max: 10 },
+      { name: '海洋深度结构\n(洋脊/深平原/陆架)', max: 10 },
+      { name: '岛弧-海沟\n体系', max: 10 },
+      { name: '极地与\n雪线格局', max: 10 },
+      { name: '气候-生物群系\n大格局', max: 10 },
+      { name: '大陆轮廓\n整体感', max: 10 },
+      { name: '盆地类型\n多样性', max: 10 },
+      { name: '半岛与\n陆间海', max: 10 },
+      { name: '山脉带状\n连续性', max: 10 },
+      { name: '水系巨型\n流域', max: 10 },
+      { name: '构造历史\n遗产', max: 10 }
+    ],
+    axisName: { fontSize: 10, color: '#374151' },
+    splitArea: { areaStyle: { color: ['rgba(45,106,159,0.02)', 'rgba(45,106,159,0.05)'] } },
+    axisLine: { lineStyle: { color: '#d1d5db' } },
+    splitLine: { lineStyle: { color: '#e5e7eb' } }
+  },
+  series: [{
+    type: 'radar',
+    data: [
+      {
+        value: [8, 7, 7, 6, 6, 6, 5, 4, 3, 3, 3, 3],
+        name: '生成地图',
+        itemStyle: { color: '#2d6a9f' },
+        areaStyle: { color: 'rgba(45,106,159,0.25)' },
+        lineStyle: { width: 2 }
+      },
+      {
+        value: [10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10],
+        name: '真实地球（参考线）',
+        itemStyle: { color: '#16a34a' },
+        lineStyle: { width: 1.5, type: 'dashed' },
+        areaStyle: { color: 'rgba(22,163,74,0.06)' }
+      }
+    ]
+  }]
+});
+
+// 柱状图：关键量化指标对比
+var barChart = echarts.init(document.getElementById('bar'));
+barChart.setOption({
+  backgroundColor: 'transparent',
+  title: {
+    text: '关键量化指标：生成地图 vs 真实地球',
+    subtext: '数据来源：TECHNICAL.md v6.6 自检记录（10 种子均值 vs ETOPO1+PB2002）',
+    left: 'center',
+    textStyle: { fontSize: 15, fontWeight: 600, color: '#1a1b1c' },
+    subtextStyle: { fontSize: 11, color: '#6b7280' }
+  },
+  tooltip: {
+    trigger: 'axis',
+    triggerOn: 'click',
+    renderMode: 'richText',
+    confine: true,
+    textStyle: { fontSize: 11, lineHeight: 14 },
+    padding: [6, 8]
+  },
+  legend: {
+    top: 56,
+    data: ['生成地图', '真实地球'],
+    itemWidth: 14, itemHeight: 8,
+    textStyle: { fontSize: 11, color: '#6b7280' }
+  },
+  grid: { left: 60, right: 30, top: 96, bottom: 70, containLabel: true },
+  xAxis: {
+    type: 'category',
+    data: ['山地带状占比\n(%)', '最大流域\n(%陆地)', '岛屿数量\n(>2000km²)', '陆架占比\n(%)', '平原占比\n(%)', '平均陆拔\n(m)'],
+    axisLabel: { fontSize: 10, color: '#555', interval: 0 },
+    axisLine: { lineStyle: { color: '#d1d5db' } }
+  },
+  yAxis: {
+    type: 'value',
+    axisLabel: { fontSize: 10, color: '#555' },
+    splitLine: { lineStyle: { color: '#f0f0f0' } }
+  },
+  series: [
+    {
+      name: '生成地图',
+      type: 'bar',
+      data: [19, 0.6, 77, 5.9, 28.1, 807],
+      itemStyle: { color: '#2d6a9f', borderRadius: [4, 4, 0, 0] },
+      barWidth: '30%',
+      label: { show: true, position: 'top', fontSize: 10, color: '#2d6a9f' }
+    },
+    {
+      name: '真实地球',
+      type: 'bar',
+      data: [84, 4.4, 113, 7.1, 28.0, 792],
+      itemStyle: { color: '#16a34a', borderRadius: [4, 4, 0, 0] },
+      barWidth: '30%',
+      label: { show: true, position: 'top', fontSize: 10, color: '#16a34a' }
+    }
+  ]
+});
+
+window.addEventListener('resize', function() {
+  radarChart.resize();
+  barChart.resize();
+});
+</script>
+<script type="text/javascript" src="/WattToolkit_Inject/1.js"></script></body>
+</html>

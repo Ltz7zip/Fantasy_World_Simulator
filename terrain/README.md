@@ -22,7 +22,7 @@ terrain/
 ├── checkpoints/           ← 模型权重
 │   └── best_terrain_gan_v5.pth       # 12 通道条件 GAN (~44MB)
 ├── cache/                 ← 可再生缓存 (删除后会自动重建, 只是变慢)
-│   ├── plate_sim_v2_T512_seed*.npz  # 板块演化结果 (同参数复用)
+│   ├── plate_sim_v22_T512_seed*.npz # 板块演化结果 (同参数复用)
 │   └── tect_cache_*.npz              # 构造条件场
 └── output/                ← 生成结果
     ├── world_map.png                 # 最终渲染图 (生物群系/河湖/雪线)
@@ -48,11 +48,14 @@ terrain/
 | 更大分辨率 | `--size 4096`（4 倍耗时） |
 | 只调渲染不改地形 | `.venv/bin/python terrain/rerender.py` |
 | 单独调试板块模拟 | `.venv/bin/python terrain/plate_sim.py --seed 7 --T 512` |
+| 批量生成多种子 | `.venv/bin/python terrain/batch_gen.py --seeds 1 2 3 4 5` |
+| 地理指标检验 | `.venv/bin/python terrain/analyze_worlds.py`（与 ETOPO1 真实地球同口径对比，输出 analysis_results.json） |
+| 生成对比拼图 | `.venv/bin/python terrain/make_montage.py` |
 | 重训 GAN | 删除 `checkpoints/best_terrain_gan_v5.pth` 后运行 `terrain_engine.py`（需要 data/ 中的 ETOPO1，约 2.5-4h on MPS） |
 
 ## 缓存管理
 
-- **板块缓存** `cache/plate_sim_v2_T{分辨率}_seed{种子}.npz`：同一 seed+tect-res 直接复用。
+- **板块缓存** `cache/plate_sim_v22_T{分辨率}_seed{种子}.npz`：同一 seed+tect-res 直接复用。
   想让某 seed 的板块重新演化（如修改了 plate_sim.py），删除对应文件即可。
 - **构造场缓存** `tect_cache_*.npz`：分辨率不匹配时自动重算。
 - **全部缓存均可删**：删除后只是变慢，不影响正确性。

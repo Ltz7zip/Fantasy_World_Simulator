@@ -777,12 +777,96 @@ def render_snow_field(v01, lats, cmap):
 
 
 # ==================== 9b. 气候因果链: 纬度温度 → 地形降水 → Whittaker 生物群系 ====================
-def temperature_field(lats, elev_m):
+def ocean_current_effects(elev_m, lats, warmT=3.5, warmP=250., warmD=400.,
+                          coldP=550., coldD=500., monP=750., monD=550.,
+                          wprP=400., wprD=300.):
+    """M4 洋流/季风气候效应 (海岸几何驱动, 地球/生成图同口径):
+    真东岸 = 海在东·陆在西(海岸N-S走向) 且向东连续开阔海面≥~420km
+      (排除红海/波斯湾/地中海凹岸等细海伪海岸)
+    西边界暖流 (湾流/黑潮型): 真东岸 |lat|30-60°(27-35°过渡门控)
+      → T+3.5°C/600km + P+250mm/400km → 西欧·东亚东岸温和湿润
+    东边界寒流 (秘鲁/本格拉/加那利型): 真西岸 |lat|5-35°
+      → P-550mm/500km → 阿塔卡马/纳米布/撒哈拉西缘海岸荒漠强化
+    季风 (东亚/南亚型): 真东岸 |lat|5-28° 且陆块>1.5%总陆
+      → P+850mm/600km → 东岸热带季节林/雨林
+    西风带雨林 (PNW/智利南/挪威西型): 真西岸 |lat|38-62°
+      → P+400mm/300km → 温带雨林于迎风第一山系涌现
+    返回 (dT, dP); 陆地外为 0。"""
+    land = elev_m > 0
+    S, W = elev_m.shape
+    a = np.abs(np.asarray(lats, np.float64))[:, None] * np.ones((1, W))
+    sea = ~land
+    # 海岸走向: 东岸(海东·陆西) / 西岸(海西·陆东), 经度环绕
+    sea_e = np.roll(sea, -1, 1); land_e = np.roll(land, -1, 1)
+    sea_w = np.roll(sea, 1, 1);  land_w = np.roll(land, 1, 1)
+    east_sea = land & sea_e & land_w
+    west_sea = land & sea_w & land_e
+    # 开阔水域: 向东/西连续海面列数 (两遍扫描处理经度环绕)
+    K = 24                                              # ~420km: 细海排除线
+    seaf = sea.astype(np.int32)
+    run_e = np.zeros((S, W), np.int32)
+    run_w = np.zeros((S, W), np.int32)
+    run = np.zeros(S, np.int32)
+    for _ in range(2):
+        for j in range(W - 1, -1, -1):
+            run = np.where(seaf[:, j], run + 1, 0)
+            run_e[:, j] = run
+    run = np.zeros(S, np.int32)
+    for _ in range(2):
+        for j in range(W):
+            run = np.where(seaf[:, j], run + 1, 0)
+            run_w[:, j] = run
+    east_open = east_sea & (np.roll(run_e, -1, 1) >= K)
+    west_open = west_sea & (np.roll(run_w, 1, 1) >= K)
+
+    kmpp = 360.0 / W * 111.32
+    dT = np.zeros((S, W), np.float64)
+    dP = np.zeros((S, W), np.float64)
+    # 纬度门控: 暖流 27-35° 过渡 (防向赤道渗透入副热带干旱带)
+    lat_gate = np.clip((a - 27.0) / 8.0, 0.0, 1.0)
+
+    # 大陆面积筛 (季风需大热容量差): 陆块>1.5% 总陆
+    from scipy.ndimage import label as _lbl
+    lab, n = _lbl(land)
+    sz = np.bincount(lab.ravel()); sz[0] = 0
+    big_cont = np.isin(lab, np.nonzero(sz >= 0.015 * land.sum())[0])
+
+    # 暖流 (湾流/黑潮): 中纬大陆东岸 — 主效应为向极热输送
+    warm = east_open & (a >= 30.0) & (a <= 60.0) & (lat_gate > 0)
+    if warm.any():
+        dw = distance_transform_edt(~warm) * kmpp
+        g = np.minimum(lat_gate, 1.0)
+        dT += warmT * np.exp(-dw / 600.0) * g * land
+        if warmP > 0:
+            dP += warmP * np.exp(-dw / warmD) * g * land
+    # 寒流 (秘鲁/本格拉/加那利): 副热带-热带大陆西岸海岸荒漠
+    cold = west_open & (a >= 5.0) & (a <= 35.0)
+    if cold.any() and coldP > 0:
+        dc = distance_transform_edt(~cold) * kmpp
+        dP -= coldP * np.exp(-dc / coldD) * land
+    # 季风 (东亚/南亚): 热带-副热带大陆东岸 (大大陆), 海岸带集中
+    mon = east_open & (a >= 5.0) & (a <= 28.0) & big_cont
+    if mon.any() and monP > 0:
+        dm = distance_transform_edt(~mon) * kmpp
+        dP += monP * np.exp(-dm / monD) * land
+    # 西风带雨林 (PNW/智利南/挪威西): 中高纬西岸迎风第一山系
+    if wprP > 0:
+        wpr = west_open & (a >= 38.0) & (a <= 62.0)
+        if wpr.any():
+            dq = distance_transform_edt(~wpr) * kmpp
+            dP += wprP * np.exp(-dq / wprD) * land
+    return dT, dP
+
+
+def temperature_field(lats, elev_m, dT=None):
     """气温 (°C): T = 27 − 0.42·|lat| − 6.5·(elev/1000) − 极地放大项
     极地放大(55°~90°平方增强) → 海平面温度在 ~80° 降至 -15°C, 极冠成雪"""
     a = np.abs(np.asarray(lats, np.float64))[:, None]
     polar = np.clip((a - 55.0) / 35.0, 0.0, 1.0) ** 2 * 22.0
-    return 27.0 - 0.42 * a - 6.5 * np.maximum(elev_m, 0.0) / 1000.0 - polar
+    T = 27.0 - 0.42 * a - 6.5 * np.maximum(elev_m, 0.0) / 1000.0 - polar
+    if dT is not None:                                # M4 洋流温度异常 (暖流+3.5/寒流-1)
+        T = T + dT
+    return T
 
 
 # 纬向基础降水 (mm/yr): ITCZ 赤道峰 → 副热带(20°~30°)干旱谷 → 温带峰 → 极地干
@@ -790,7 +874,7 @@ _P_LAT = np.array([0, 5, 10, 15, 20, 25, 30, 35, 45, 55, 65, 80, 90], np.float64
 _P_MM = np.array([2300, 2150, 1700, 1150, 700, 520, 560, 680, 850, 750, 480, 230, 130], np.float64)
 
 
-def precipitation_field(lats, elev_m, rng=None):
+def precipitation_field(lats, elev_m, rng=None, dP=None):
     """年降水 (mm/yr): 纬向基础 × 盛行风向地形抬升。
     信风/极地东风(东→西)与西风(西→东)按纬度分带扫描:
     迎风坡地形雨 → 背风雨影; 陆上水汽随路径衰减 → 大陆腹地自动成旱区。"""
@@ -819,6 +903,8 @@ def precipitation_field(lats, elev_m, rng=None):
     west = ((a >= 30.0) & (a <= 60.0))[:, None]
     P = np.where(west, p_w, p_e).astype(np.float32)
     P = gaussian_filter(P, 2.0)
+    if dP is not None:                                # M4 洋流/季风异常 (过滤后)
+        P = np.maximum(P + dP, 0.0).astype(np.float32)
     if rng is not None:
         P = P * np.exp(0.30 * value_fbm(w, 10.0, 3, rng=rng))
     return P
@@ -947,6 +1033,681 @@ def postprocess_pipeline(v01, bm, bstd, lf, lats, rng, block=8):
     landness = np.clip((s - 0.5) / 0.02, 0, 1)
     s = np.clip(s - 0.03 * (t ** 0.8) * landness * (~ice), 0, 1)
     return s.astype(np.float32)
+
+
+# ==================== 9d. v6.6 检验修复层 (七大地理维度对齐) ====================
+# 地球陆地高程分位数 —— ETOPO1(Ice) 2048 实测 (含南极/格陵兰冰盖)
+_LAND_Q = np.arange(0, 1.0001, 0.025)
+_LAND_V = np.array([0.0, 14.0, 31.0, 49.0, 68.0, 88.0, 110.0, 130.0, 150.0,
+                    170.0, 200.0, 230.0, 260.0, 290.0, 320.0, 350.0, 390.0,
+                    420.0, 470.0, 520.0, 570.0, 640.0, 720.0, 820.0, 930.0,
+                    1000.0, 1200.0, 1300.0, 1400.0, 1600.0, 1900.0, 2100.0,
+                    2300.0, 2500.0, 2700.0, 2800.0, 3000.0, 3100.0, 3300.0,
+                    3700.0, 6400.0], np.float64)
+# 同上, 但按 cos(纬度) 面积加权 (与验收口径一致; 南极冰盖降权)
+_LAND_W_V = np.array([0.0, 13.6, 30.5, 48.1, 65.5, 83.7, 101.6, 119.3,
+                      137.2, 155.2, 174.3, 195.2, 217.7, 241.9, 266.6,
+                      289.8, 312.5, 337.5, 363.9, 392.2, 420.1, 451.5,
+                      486.2, 526.8, 572.7, 625.6, 686.5, 758.5, 842.5,
+                      932.3, 1024.4, 1119.4, 1225.3, 1358.4, 1531.9,
+                      1775.2, 2097.6, 2507.4, 2995.3, 3658.8, 6350.8], np.float64)
+
+
+def land_hist_match(elev_m, lats=None):
+    """P0 陆地直方图重映射: 排名保持(单调) → 陆地高程分布对齐地球实测。
+    修复 GAN"回归均值"(89%陆地挤在200~1000m) → 28%平原/46%台地/26%山地。
+    单调映射不改变海岸线与空间秩序: 骨架最低的大片陆地→平原, 最高→山带。
+    lats 给定时按 cos(纬度) 加权分位(目标 _LAND_W_V) → 与面积加权验收口径一致。"""
+    land = elev_m > 0
+    if not land.any():
+        return elev_m
+    lv = elev_m[land].astype(np.float64)
+    order = np.argsort(lv)
+    if lats is not None:
+        coslat = np.clip(np.cos(np.deg2rad(lats)), 0.0, 1.0)     # (H,)
+        rows = np.nonzero(land)[0]                               # 陆地像素行号(行优先)
+        wl = coslat[rows][order]
+        wc = np.cumsum(wl)
+        wc = (wc - 0.5 * wl) / wc[-1]
+        tgt = np.interp(wc, _LAND_Q, _LAND_W_V)
+    else:
+        wc = (np.arange(lv.size) + 0.5) / lv.size
+        tgt = np.interp(wc, _LAND_Q, _LAND_V)
+    out = elev_m.copy()
+    out[land] = tgt[order.argsort()].astype(np.float32)
+    return out.astype(np.float32)
+
+
+def ocean_margin_fix(elev_m, tect1_up, margin_up=None,
+                     km_shelf=115.0, km_slope=175.0):
+    """P0 2048陆架-陆坡修复: 海岸噪声破坏近岸剖面后重新强制
+    陆架(0→-163m) + 陆坡(→-1900m) + 陆隆渐出(→-4500m 放开)。
+    v3.0 per-margin 分化: margin_up=1 被动边缘(大西洋型宽陆架 km_shelf)
+    / =2 主动边缘(太平洋型窄陆架 35km+陡坡) / =0 或 None 用默认宽。
+    俯冲核带(tect1高)与已有深结构(>-4600m)不抬升 → 保海沟与深渊平原。"""
+    S = elev_m.shape[0]
+    land = elev_m > 0
+    kmpp = 360.0 / S * 111.32
+    d = distance_transform_edt(~land) * kmpp
+
+    def shelf_profile(km_s, km_p):
+        return np.where(d < km_s, -18.0 - 145.0 * d / km_s,
+                        np.where(d < km_s + km_p,
+                                 -163.0 - 1737.0 * (d - km_s) / km_p,
+                                 np.where(d < km_s + km_p + 160.0,
+                                          -1900.0 - 2600.0 * (d - km_s - km_p) / 160.0,
+                                          -1.0e9)))
+
+    prof = shelf_profile(km_shelf, km_slope).astype(np.float32)
+    ok = (~land) & (tect1_up < 0.30) & (elev_m > -4600.0)
+    out = np.where(ok, np.maximum(elev_m, prof), elev_m)
+    if margin_up is not None:
+        # 主动边缘: 窄陆架 35km + 陡坡 (替换宽剖面, 太平洋型)
+        act = (margin_up >= 2) if margin_up.shape == elev_m.shape else None
+        if act is None:
+            z = np.zeros(elev_m.shape, bool)
+            z[:min(margin_up.shape[0], elev_m.shape[0]),
+              :min(margin_up.shape[1], elev_m.shape[1])] = \
+                margin_up[:elev_m.shape[0], :elev_m.shape[1]] >= 2
+            act = z
+        if act.any():
+            prof_a = shelf_profile(35.0, 95.0).astype(np.float32)
+            ok_a = (~land) & act & (elev_m > -4600.0)
+            out = np.where(ok_a, np.maximum(elev_m, prof_a), out)
+    return out.astype(np.float32)
+
+
+def add_island_arcs(elev_m, tect1_up, cf, rng):
+    """P1 岛弧链 (日本/印尼型): 俯冲核带法向偏移 180~340km,
+    取大陆侧(crust概率高)且仍为海的点盖章长条岛 → 弧后链状群岛。
+    岛长4~11px/宽1.5~3px/峰500~2200m, 沿核线间隔采样 → 链状。"""
+    from scipy.ndimage import label as ndi_label
+    S = elev_m.shape[0]
+    thr = float(np.quantile(tect1_up, 0.995))
+    if thr <= 0:
+        return elev_m
+    core = tect1_up > max(thr, 0.25)
+    lab, n = ndi_label(core)
+    if n == 0:
+        return elev_m
+    g = gaussian_filter(tect1_up.astype(np.float32), 2.0)
+    gy, gx = np.gradient(g)
+    out = elev_m.copy()
+    for i in range(1, n + 1):
+        ys, xs = np.nonzero(lab == i)
+        if ys.size < 25:
+            continue
+        d_arc = rng.uniform(9.0, 17.0)
+        L = rng.uniform(4.0, 11.0)
+        W = rng.uniform(1.5, 3.0)
+        n_st = max(2, ys.size // 4)
+        for k in rng.choice(ys.size, size=min(ys.size, n_st), replace=False):
+            y, x = int(ys[k]), int(xs[k])
+            gn = float(np.hypot(gx[y, x], gy[y, x])) + 1e-9
+            nx_, ny_ = gx[y, x] / gn, gy[y, x] / gn
+            cands = []
+            for sgn in (1.0, -1.0):
+                oy = int(round(y + sgn * ny_ * d_arc))
+                ox = int(round(x + sgn * nx_ * d_arc)) % S
+                if 0 <= oy < S:
+                    cands.append((cf[oy, ox], oy, ox))
+            if not cands:
+                continue
+            _, oy, ox = max(cands)                    # 大陆侧
+            if out[oy, ox] >= 0.0 or out[oy, ox] < -5200.0:
+                continue                              # 只要浅海盖章
+            ang = rng.uniform(0, 2 * np.pi)           # 岛长轴随机倾斜
+            tx, ty = -ny_, nx_
+            ca, sa = np.cos(ang), np.sin(ang)
+            ux, uy = tx * ca - ty * sa, tx * sa + ty * ca
+            pad = int(L) + 3
+            if ox - pad < 0 or ox + pad >= S or oy - pad < 0 or oy + pad >= S:
+                continue
+            yy, xx = np.mgrid[oy - pad:oy + pad + 1, ox - pad:ox + pad + 1]
+            dy_, dx_ = yy - oy, xx - ox
+            along = (dx_ * ux + dy_ * uy) / L
+            across = (dx_ * -uy + dy_ * ux) / W
+            H = rng.uniform(500.0, 2200.0) * rng.uniform(0.7, 1.3)
+            blob = H * np.exp(-along ** 2 - across ** 2)
+            m = (blob > 80.0) & (out[yy, xx] < 0)
+            out[yy[m], xx[m]] += blob[m]
+    return out
+
+
+def add_hotspot_chains(elev_m, rng, n_chains=None):
+    """P1 热点岛链 (夏威夷型): 开阔洋中随机方向 3~6 岛链,
+    单岛半径1.6~3.2px, 峰300~1600m 随链龄衰减 → 线状岛链+海山。"""
+    S = elev_m.shape[0]
+    land = elev_m > 0
+    d_land = distance_transform_edt(~land)
+    n_chains = n_chains if n_chains is not None else int(rng.randint(3, 7))
+    out = elev_m.copy()
+    placed, tries = 0, 0
+    while placed < n_chains and tries < 300:
+        tries += 1
+        y = int(rng.randint(60, S - 60))
+        x = int(rng.randint(0, S))
+        if land[y, x] or d_land[y, x] < 18.0:
+            continue
+        placed += 1
+        ang = rng.uniform(0, 2 * np.pi)
+        dy, dx = np.sin(ang), np.cos(ang)
+        n_isl = int(rng.randint(3, 7))
+        gap = rng.uniform(4.0, 8.0)
+        H0 = rng.uniform(900.0, 1600.0)
+        for j in range(n_isl):
+            cy = int(round(y + dy * gap * j))
+            cx = int(round(x + dx * gap * j)) % S
+            if not (20 <= cy < S - 20) or cx < 6 or cx >= S - 6:
+                break
+            h = H0 * (1.0 - 0.55 * j / n_isl) * rng.uniform(0.7, 1.3)
+            r = rng.uniform(1.6, 3.2)
+            yy, xx = np.mgrid[cy - 5:cy + 6, cx - 5:cx + 6]
+            blob = h * np.exp(-(((yy - cy) ** 2 + (xx - cx) ** 2) / (r * r)))
+            m = blob > 60.0
+            out[yy[m], xx[m]] += blob[m]
+    return out
+
+
+def carve_fjords(elev_m, lats, margin_up, rng, lat_min=54.0, n_fjords=None):
+    """M3 峡湾雕刻 (斯堪的纳维亚/格陵兰型): 高纬被动边缘从海岸向内陆
+    刻窄谷 (宽1-2px, 深80-300m, 长4-10px, 二级分叉) → 冰蚀海岸。
+    仅 |lat|>54° 被动边缘带; U形谷横剖面。"""
+    S = elev_m.shape[0]
+    land = elev_m > 0
+    pas = (margin_up == 1) if margin_up is not None else None
+    if pas is None or not pas.any():
+        return elev_m
+    # 高纬被动海岸线 = 陆地且邻海
+    sea = ~land
+    coast = land & pas & (np.abs(lats)[:, None] > lat_min) \
+            & (np.roll(sea, 1, 0) | np.roll(sea, -1, 0)
+               | np.roll(sea, 1, 1) | np.roll(sea, -1, 1))
+    ys, xs = np.nonzero(coast)
+    if ys.size == 0:
+        return elev_m
+    out = elev_m.copy()
+    # 内陆方向场: 一次计算 (上坡梯度)
+    g = gaussian_filter(out.astype(np.float32), 2.0)
+    gy, gx = np.gradient(g)
+    gn = np.hypot(gx, gy) + 1e-9
+    ux_f, uy_f = gx / gn, gy / gn                # 上坡=内陆
+    n_fjords = n_fjords if n_fjords is not None else int(min(ys.size, 900))
+    pick = rng.choice(ys.size, size=n_fjords, replace=False)
+    for p in pick:
+        y, x = int(ys[p]), int(xs[p])
+        ux, uy = ux_f[y, x], uy_f[y, x]
+        L = rng.uniform(4.0, 10.0)
+        depth = rng.uniform(80.0, 300.0)
+        W = rng.uniform(1.2, 2.2)
+        cy, cx = float(y), float(x)
+        for t in range(int(L)):
+            cy -= uy; cx += ux                    # 上坡 = 内陆
+            iy, ix = int(round(cy)), int(round(cx)) % S
+            if not (0 <= iy < S) or out[iy, ix] <= 0:
+                break
+            pad = int(W) + 2
+            y0, y1 = max(0, iy - pad), min(S, iy + pad + 1)
+            x0, x1 = max(0, ix - pad), min(S, ix + pad + 1)
+            yy, xx = np.mgrid[y0:y1, x0:x1]
+            r = np.hypot(yy - iy, xx - ix)
+            cut = depth * np.clip(1.0 - (r / W) ** 2, 0, 1)  # U形
+            m = (r < W * 1.4) & (out[y0:y1, x0:x1] > 60.0)   # 不切到海平面下
+            out[y0:y1, x0:x1] = np.where(
+                m, np.maximum(out[y0:y1, x0:x1] - cut * m, 15.0),
+                out[y0:y1, x0:x1])
+            # 二级分叉 (10%)
+            if t > 2 and rng.rand() < 0.10:
+                a2 = rng.uniform(0, 2 * np.pi)
+                cy2, cx2 = cy, cx
+                for _ in range(int(L * 0.5)):
+                    cy2 += np.sin(a2); cx2 += np.cos(a2)
+                    iy2, ix2 = int(round(cy2)), int(round(cx2)) % S
+                    if not (0 <= iy2 < S) or out[iy2, ix2] <= 0:
+                        break
+                    y0b, y1b = max(0, iy2 - 3), min(S, iy2 + 4)
+                    x0b, x1b = max(0, ix2 - 3), min(S, ix2 + 4)
+                    yy2, xx2 = np.mgrid[y0b:y1b, x0b:x1b]
+                    rr = np.hypot(yy2 - iy2, xx2 - ix2)
+                    cut2 = depth * 0.6 * np.clip(
+                        1.0 - (rr / (W * 0.7)) ** 2, 0, 1)
+                    m2 = (rr < W) & (out[y0b:y1b, x0b:x1b] > 0)
+                    out[y0b:y1b, x0b:x1b] = np.where(
+                        m2, out[y0b:y1b, x0b:x1b] - cut2 * m2,
+                        out[y0b:y1b, x0b:x1b])
+    return out.astype(np.float32)
+
+
+def add_shelf_peninsulas(elev_m, margin_up, cf, rng, lats=None,
+                         n_pen=None, n_isl=None):
+    """M3 陆架台地半岛 + 大陆岛 (阿拉伯/佛罗里达/不列颠型):
+    被动边缘宽陆架台地上, 海平面微抬 +15m → 台地露头成半岛/岛。
+    台地 = 被动边缘 0-90km 内 -60~+60m 平缓带 → 加 fBm 起伏后 ±15m 阈值化。"""
+    S = elev_m.shape[0]
+    land = elev_m > 0
+    pas = (margin_up == 1) if margin_up is not None else None
+    if pas is None or not pas.any():
+        return elev_m, 0
+    d = distance_transform_edt(~land)
+    kmpp = 360.0 / S * 111.32
+    d_km = d * kmpp
+    shelf = (~land) & (pas | (d_km < 95.0)) & (elev_m > -170.0)
+    if not shelf.any():
+        return elev_m, 0
+    # 台地起伏: 低频 fBm; 台地基面 = 陆架剖面等效 (-160m 基 + fBm ±70m)
+    # (真实陆架多被 ocean_margin_fix 压至 -163m, 阈值需覆盖全陆架)
+    # M6: 基频 8→11 (特征 σ128→93px) → 更多中型露头 (大岛数 72.7 vs 地球 113)
+    tf = value_fbm(S, 11.0, 3, rng=rng)
+    tfc = np.clip(tf, 0, 1)
+    out = elev_m.copy()
+    plateau = shelf & (elev_m > -165.0) & (d_km < 95.0)
+    out = np.where(plateau, np.maximum(out, -160.0 + 130.0 * (tf + 0.5)),
+                   out)
+    # 海平面等效 +15m: 台地内 -15~+45m 的连通域成陆 (半岛/大陆岛)
+    # 近岸带(<25km)阈值放宽(-25m) → 露头连片成大岛/半岛 (不列颠型)
+    near = plateau & (d_km < 25.0)
+    new_land = (plateau & (out > -15.0)) | (near & (out > -25.0))
+    # 清碎屑: 只留 >12px 的露头 (真半岛/岛)
+    from scipy.ndimage import label as _lbl
+    lab, n = _lbl(new_land)
+    if n:
+        sz = np.bincount(lab.ravel()); sz[0] = 0
+        keep = np.isin(lab, np.nonzero(sz >= 12)[0])
+        new_land = new_land & keep
+        # 大陆岛增益: 离岸 8-60km 中型露头(20-4000px)抬高确保成岛
+        offshore = new_land & (d * kmpp > 8.0) & (d * kmpp < 60.0)
+        lab2, n2 = _lbl(offshore)
+        if n2:
+            sz2 = np.bincount(lab2.ravel()); sz2[0] = 0
+            big = np.isin(lab2, np.nonzero((sz2 >= 20) & (sz2 <= 4000))[0])
+            offshore = offshore & big
+            out = np.where(offshore,
+                           np.maximum(out, 8.0 + 45.0 * tfc),
+                           out)
+    out = np.where(new_land, np.maximum(out, 3.0 + 30.0 * tfc),
+                   out).astype(np.float32)
+    n_out = int(new_land.sum())
+    return out, n_out
+
+
+def add_coral_reefs(elev_m, lats, rng, temp_fn=None, n_reef=None):
+    """M3 珊瑚礁带 (马尔代夫/太平洋环礁型): |lat|<28° 浅海(-60~0m)
+    且海表温度>20°C 处, 低概率抬升小岛 (峰3-8m, r=1-2px, 群集3-8个)。"""
+    S = elev_m.shape[0]
+    sea_shallow = (elev_m > -60.0) & (elev_m <= 0.0) \
+                  & (np.abs(lats)[:, None] < 28.0)
+    if temp_fn is not None:
+        sea_shallow &= temp_fn > 20.0
+    ys, xs = np.nonzero(sea_shallow)
+    if ys.size == 0:
+        return elev_m
+    out = elev_m.copy()
+    n_reef = n_reef if n_reef is not None else int(min(ys.size * 0.012, 420))
+    # 礁盘中心: 稀疏采样 + 群集
+    pick = rng.choice(ys.size, size=min(n_reef, ys.size), replace=False)
+    for p in pick:
+        cy, cx = int(ys[p]), int(xs[p])
+        n_isl = int(rng.randint(3, 9))
+        for _ in range(n_isl):
+            oy = int(round(cy + rng.normal(0, 3.5)))
+            ox = int(round(cx + rng.normal(0, 3.5))) % S
+            if not (0 <= oy < S):
+                continue
+            if out[oy, ox] > 0 or out[oy, ox] < -60.0:
+                continue
+            h = rng.uniform(3.0, 8.0)
+            r = rng.uniform(1.0, 2.0)
+            y0, y1 = max(0, oy - 3), min(S, oy + 4)
+            x0, x1 = max(0, ox - 3), min(S, ox + 4)
+            if y1 <= y0 or x1 <= x0:
+                continue
+            yy, xx = np.mgrid[y0:y1, x0:x1]
+            blob = h * np.exp(-((np.hypot(yy - oy, xx - ox) / r) ** 2))
+            m = (blob > 1.5) & (out[y0:y1, x0:x1] <= 0)
+            out[y0:y1, x0:x1] = np.where(
+                m, np.maximum(out[y0:y1, x0:x1],
+                              (0.0 + blob * 0.6)),
+                out[y0:y1, x0:x1])
+    return out.astype(np.float32)
+
+
+def add_intraplate_orogen(elev_m, cf, tect1_up, rng, n=None):
+    """P2 板内造山 (落基山/东非裂谷肩型): 大陆内部远离活跃边界处
+    盖1~2条板内山地: 长20~45px 宽4~9px 峰1600~3400m, 平顶脊状+噪声。
+    打破"山地100%锁定俯冲带"的过纯耦合 (地球山地过半在板内)。"""
+    S = elev_m.shape[0]
+    n = n if n is not None else int(rng.randint(1, 3))
+    out = elev_m.copy()
+    cand = (cf > 0.62) & (tect1_up < 0.15) & (out > 0)
+    for _ in range(n):
+        ys, xs = np.nonzero(cand)
+        if ys.size < 400:
+            break
+        k = int(rng.randint(ys.size))
+        cy, cx = int(ys[k]), int(xs[k])
+        ang = rng.uniform(0, np.pi)
+        L = rng.uniform(20.0, 45.0)
+        W = rng.uniform(4.0, 9.0)
+        H = rng.uniform(1600.0, 3400.0)
+        ux, uy = np.cos(ang), np.sin(ang)
+        pad = int(L) + 4
+        yy, xx = np.mgrid[max(0, cy - pad):min(S, cy + pad + 1),
+                          max(0, cx - pad):min(S, cx + pad + 1)]
+        dy_, dx_ = yy - cy, xx - cx
+        along = (dx_ * ux + dy_ * uy) / L
+        across = (dx_ * -uy + dy_ * ux) / W
+        ridge = np.exp(-along ** 4 - across ** 2)
+        nf = value_fbm(max(yy.shape), 8.0, 3, rng=rng)
+        noise = 0.65 + 0.35 * np.clip(
+            nf[:yy.shape[0], :yy.shape[1]] * 1.6, -1.0, 1.5)
+        add = H * ridge * noise
+        m = (out[yy, xx] > 0) & (add > 60.0)
+        out[yy[m], xx[m]] += add[m]
+    return out
+
+
+def carve_trunk_rivers(v01, rng, sigma=6.0, q=0.9985, max_depth=0.045,
+                       width=3.2):
+    """P1 干流河谷: 大陆尺度平滑面 D8 流累积 → 主河道走廊高斯下切。
+    平滑面消除块均值撕裂 → 干流贯通大陆内部低地与海岸,
+    全分辨率河网沿走廊汇集 → 亚马逊/密西西比级大河谷。"""
+    land = v01 >= 0.5
+    if not land.any():
+        return v01
+    v01s = gaussian_filter(v01, sigma)
+    filled = fill_depressions(v01s)
+    acc = d8_flow_accumulation(filled, rng)
+    aL = acc[land]
+    if aL.size < 100:
+        return v01
+    thr = float(np.quantile(aL, q))
+    ch = land & (acc > thr)
+    if not ch.any():
+        return v01
+    d = distance_transform_edt(~ch)
+    w = np.clip(acc / (4.0 * thr), 0.0, 1.0)
+    depth = max_depth * (0.45 + 0.55 * w)
+    return np.clip(v01 - depth * np.exp(-(d / width) ** 2) * land,
+                   0, 1).astype(np.float32)
+
+
+def land_hist_final(v01, lats=None):
+    """P0 陆地直方图终检 (v01域): GAN blend/后处理漂移后,
+    排序CDF重新对齐 m2v(地球陆地分位) → 平原/台地/山地比例精确复原。
+    单调重排保留全部空间秩序(谷<脊, V谷细节不损), 陆地不越海平面。
+    lats 给定时按 cos(纬度) 加权分位(目标 _LAND_W_V) → 与面积加权验收口径一致。"""
+    land = v01 >= 0.5
+    if not land.any():
+        return v01
+    n = int(land.sum())
+    order = np.argsort(v01[land])
+    if lats is not None:
+        coslat = np.clip(np.cos(np.deg2rad(lats)), 0.0, 1.0)     # (H,)
+        rows = np.nonzero(land)[0]                               # 陆地像素行号(行优先)
+        wl = coslat[rows][order]
+        wc = np.cumsum(wl)
+        wc = (wc - 0.5 * wl) / wc[-1]
+        tgt = m2v(np.interp(wc, _LAND_Q, _LAND_W_V)).astype(np.float32)
+    else:
+        wc = (np.arange(n) + 0.5) / n
+        tgt = m2v(np.interp(wc, _LAND_Q, _LAND_V)).astype(np.float32)
+    out = v01.copy()
+    out[land] = tgt[order.argsort()]
+    return np.clip(out, 0, 1).astype(np.float32)
+
+
+# 地球深洋 (深度<-1000m) cos(lat) 加权分位 —— ETOPO1(Ice) 2048 实测 (M6 标定)
+# 尾部加密网格 (hadal 仅 1.085% 深洋: 粗网格线性插值会把 2% 分位错插到 -6766)
+_OCD_Q = np.array([0.0000, 0.0010, 0.0020, 0.0030, 0.0050, 0.0070, 0.0090,
+                   0.0110, 0.0130, 0.0160, 0.0200, 0.0240, 0.0250, 0.0500,
+                   0.0750, 0.1000, 0.1250, 0.1500, 0.1750, 0.2000, 0.2250,
+                   0.2500, 0.2750, 0.3000, 0.3250, 0.3500, 0.3750, 0.4000,
+                   0.4250, 0.4500, 0.4750, 0.5000, 0.5250, 0.5500, 0.5750,
+                   0.6000, 0.6250, 0.6500, 0.6750, 0.7000, 0.7250, 0.7500,
+                   0.7750, 0.8000, 0.8250, 0.8500, 0.8750, 0.9000, 0.9250,
+                   0.9500, 0.9750, 0.9760, 0.9840, 0.9880, 0.9910, 0.9930,
+                   0.9950, 0.9970, 0.9990, 1.0000])
+_OCD_V = np.array([-10517, -7239, -6657, -6353, -6157, -6082, -6034, -5997,
+                   -5966, -5923, -5877, -5837, -5828, -5644, -5518, -5417,
+                   -5330, -5249, -5173, -5102, -5032, -4962, -4892, -4820,
+                   -4748, -4676, -4607, -4538, -4472, -4407, -4342, -4277,
+                   -4210, -4140, -4067, -3992, -3915, -3837, -3757, -3673,
+                   -3586, -3492, -3391, -3281, -3160, -3016, -2842, -2636,
+                   -2356, -2000, -1550, -1530, -1363, -1277, -1210, -1165,
+                   -1120, -1073, -1024, -1000], np.float64)
+
+
+def ocean_hist_final(dem, lats=None):
+    """M6 海洋直方图终检 (米域): 深洋(<-1000m)排序 CDF → 地球深洋加权分位。
+    GAN v01 域饱和(0 → -11000m)与包络混合使深洋带漂移 (hadal 3.7% vs 0.96%);
+    单调重排保结构 (海沟仍最深, 俯冲速率序保留), 陆架-陆坡带(>-1000m)不动。"""
+    ocean = dem < -1000.0
+    n = int(ocean.sum())
+    if n < 1000:
+        return dem
+    order = np.argsort(dem[ocean])
+    if lats is not None:
+        rows = np.nonzero(ocean)[0]                      # 行优先 → 与 dem[ocean] 同序
+        coslat = np.clip(np.cos(np.deg2rad(np.asarray(lats, np.float64))), 0.0, 1.0)
+        w = coslat[rows][order]
+        cw = np.cumsum(w)
+        wc = ((cw - 0.5 * w) / cw[-1]).astype(np.float64)
+    else:
+        wc = (np.arange(n) + 0.5) / n
+    tgt = np.interp(wc, _OCD_Q, _OCD_V).astype(np.float32)
+    tmp = dem[ocean]
+    tmp[order] = tgt
+    out = dem.copy()
+    out[ocean] = tmp
+    return out.astype(np.float32)
+
+
+# ==================== 9d. M5 克拉通大流域盆地 ====================
+def add_craton_basins(dem, conv, rng, belt=None, lats=None,
+                      max_exo=2, endorheic=True,
+                      target_lo=0.032, target_hi=0.065,
+                      min_share=0.015):
+    """M5 克拉通大流域盆地 (亚马逊/刚果/西西伯利亚型):
+    稳定陆内低地(低起伏·低收敛·|lat|<72°)重塑为向单一出口的线性倾斜面:
+      z = z_out + (z_far−z_out)·(d/d_max) + fBm微起伏(±18m, 远端减半)
+    线性坡 (~4m/px) > σ6平滑后噪声 → D8 全流域汇入单一出口
+      → top1 流域 3-4.5% 陆地, 干流走廊自动成河。
+    超大低地连通域 → 以最低单元为种子盘状裁切到目标份额。
+    出口 = 盆地 1000km 内最低海岸点; 无出海路径 → 内陆海 (里海型,
+    终端洼地 −28m)。颈道保通: 出口-盆地间 min(原地形, 线性坡道) 下切。
+    返回 (dem, n_basins, info)。"""
+    S, W = dem.shape
+    land = dem > 0
+    n_land = int(land.sum())
+    if n_land < 10000:
+        return dem, 0, ""
+    f = max(1, S // 128)                                   # 粗化因子 (2048→16)
+    Hc, Wc = S // f, W // f
+    sub = dem[:Hc * f, :Wc * f].reshape(Hc, f, Wc, f)
+    cm = sub.mean((1, 3)); cs = sub.std((1, 3))
+    cc = conv[:Hc * f, :Wc * f].reshape(Hc, f, Wc, f).mean((1, 3))
+    cb = (belt[:Hc * f, :Wc * f].reshape(Hc, f, Wc, f).max((1, 3))
+          if belt is not None else np.zeros_like(cm))
+    from scipy.ndimage import label as _lbl, binary_closing
+
+    def _edt_to(m):                                        # 周期 EDT: 到 m 的距离 (m内=0)
+        return distance_transform_edt(np.tile(~m, (1, 3)))[:, W:2 * W]
+
+    ocean = ~land
+    coastal = land & (np.roll(ocean, 1, 0) | np.roll(ocean, -1, 0)
+                      | np.roll(ocean, 1, 1) | np.roll(ocean, -1, 1))
+    d_sea_full = _edt_to(ocean)                            # 距海 (全分辨率, px)
+    # 粗块级内陆判据: 块均值距海 ≥60px → 排除沿海平原/海湾两岸碎片
+    # (水系不连通的伪盆地; 真正克拉通盆地应在大陆内部)
+    d_sea_c = d_sea_full[:Hc * f, :Wc * f].reshape(Hc, f, Wc, f).mean((1, 3))
+    lat_c = (np.abs(np.asarray(lats, np.float64))[:, None]
+             if lats is not None else np.zeros((S, 1)))
+    info, n_endo = [], 0
+    land_c = cm > 0.0
+    if land_c.sum() < 16:
+        return dem, 0, ""
+    for relax in (False, True):                            # 二轮: 严格→放宽
+        # 分位数自适应阈值: 起伏/收敛取陆块相对低值 (适配任意管线阶段)
+        # M6: 陆块占比 ≥0.75 — 群岛混块(陆海各半的粗块)均值可伪过判据,
+        # 倾斜面盖在群岛上各岛独立排水 → 流域不收敛
+        lf_c = land[:Hc * f, :Wc * f].reshape(Hc, f, Wc, f).mean((1, 3))
+        cs_thr = np.quantile(cs[land_c], 0.60 if not relax else 0.78)
+        cc_thr = np.quantile(cc[land_c], 0.72 if not relax else 0.88)
+        elig = ((cm > 50) & (cm < (800 if not relax else 950))
+                & (cs < cs_thr) & (cc < cc_thr) & (cb < 0.45)
+                & (lf_c >= 0.75)
+                & (d_sea_c >= (45.0 if not relax else 30.0)))
+        if lats is not None:                               # 极地冰原不建盆地
+            elig &= np.repeat(np.abs(lat_c[f // 2::f, 0])[:, None] < 72.0, Wc, 1)
+        el_c = binary_closing(elig, iterations=1)
+        lab_c, n_c = _lbl(el_c)
+        if n_c == 0:
+            continue
+        sizes = np.array([(lab_c == i).sum() * f * f for i in range(1, n_c + 1)])
+        n_exo = 0
+        for oi in np.argsort(sizes)[::-1][:4]:
+            if n_exo >= max_exo:
+                break
+            base = lab_c == (oi + 1)
+            a_base = base.sum() * f * f
+            if a_base < min_share * n_land:
+                continue
+            if a_base > target_hi * n_land:                # 超大连通域: 最低单元种子裁切
+                ys, xs = np.nonzero(base)
+                k = int(np.argmin(cm[ys, xs]))
+                seed = np.zeros_like(base); seed[ys[k], xs[k]] = True
+                d_seed = distance_transform_edt(~seed)
+                grown = None
+                for r in range(2, 40):
+                    g = base & (d_seed <= r)
+                    if g.sum() * f * f >= target_lo * n_land:
+                        grown = g
+                        break
+                if grown is None:
+                    continue
+            elif a_base < target_lo * n_land:              # 小域: 向外生长
+                d_c = distance_transform_edt(~base)
+                grown = base
+                for r in range(1, 8):
+                    g = elig & (d_c <= r)
+                    if g.sum() * f * f > target_hi * n_land:
+                        break
+                    grown = g
+                    if g.sum() * f * f >= target_lo * n_land:
+                        break
+            else:
+                grown = base
+            mask = np.repeat(np.repeat(grown, f, 0), f, 1)[:S, :W] & land
+            mask &= (dem < 1400)
+            if belt is not None:
+                mask &= (belt < 0.45)
+            if mask.sum() < min_share * n_land:
+                continue
+            d_to = _edt_to(mask)                           # 到掩模距离 (内=0)
+            near = coastal & (d_to <= 50.0)                # ~1000km 内海岸
+            if near.any():
+                ys, xs = np.nonzero(near)
+                k = int(np.argmin(dem[ys, xs]))
+                oy, ox = int(ys[k]), int(xs[k])
+                mode = 'exo'
+            elif endorheic and n_endo == 0:
+                ys, xs = np.nonzero(mask)
+                k = int(np.argmin(dem[ys, xs]))
+                oy, ox = int(ys[k]), int(xs[k])
+                mode = 'endo'
+            else:
+                continue
+            pt = np.zeros((S, W), bool); pt[oy, ox] = True
+            d_o = _edt_to(pt)                              # 距出口/终端 (周期)
+            # 海岸分水岭后撤 + 出口扇区豁免: 距海 <25px 不重塑 (保分水岭),
+            # 但出口 60px 扇区豁免 → 倾斜面直达海岸 (防 25px 原始带挡水,
+            # 仅 6px 河道口过流 → 大量分流)
+            if mode == 'exo':
+                mask &= (d_sea_full >= 25.0) | (d_o <= 60.0)
+                if mask.sum() < min_share * n_land:
+                    continue
+            d_in = _edt_to(~mask)                          # 掩模内距边界 (外=0)
+            d_to = _edt_to(mask)
+            # 分水岭保底: 倾斜面远端 ≥ 盆缘外围地形 75 分位
+            # (若 z_far < 外围, 远端水向盆外低地泄漏 → 流域破碎)
+            ring = (d_to > 0) & (d_to <= 10.0) & land & ~mask
+            z_ring = float(np.quantile(dem[ring], 0.75)) if ring.sum() > 50 \
+                else float(np.quantile(dem[mask], 0.85))
+            z_far = min(max(float(np.quantile(dem[mask], 0.60)), z_ring), 900.0)
+            w = np.clip(d_in / 8.0, 0, 1)                   # 边界 feather 8px (仅掩模内)
+            w = w * w * (3 - 2 * w)
+            w *= np.clip((1400.0 - dem) / 350.0, 0, 1)     # 山缘衰减 (高地不重塑)
+            w[~land] = 0.0
+            dmax = float(np.quantile(d_o[mask], 0.92))
+            if dmax < 20:
+                continue
+            z_out = float(dem[oy, ox]) if mode == 'exo' else -28.0
+            # 坡度保底: 主坡 ≥0.9 m/px — fill_depressions 的 eps 排水梯度
+            # ~0.57 m/px (4e-4 v01 @200-1000m 段), 主坡低于它会被填洼梯度
+            # 淹没 → 径向流失效 (z_far 保底 = z_out + 0.9·dmax)
+            z_far = max(z_far, z_out + 0.9 * dmax)
+            rel = 3.0 * value_fbm(S, 60.0, 2, rng=rng)      # 极弱长波起伏
+            rel = rel * (1.0 - 0.5 * np.clip(d_o / dmax, 0, 1))
+            z_b = z_out + (z_far - z_out) * np.clip(d_o / dmax, 0, 1) + rel
+            z_b = np.maximum(z_b, 8.0 if mode == 'exo' else -30.0)
+            # 分水岭筑堤: mask 外缘 10px 环带低洼段 (海湾/海峡/外部谷地)
+            # 抬至 z_far+20m → 阻断 D8 边界漏水; 河网走廊豁免由 d_o 门控;
+            # σ6 平滑后堤仍高于倾斜面 → 径向流唯一出口 (直方图终检校准回)
+            dyke = (d_to > 0) & (d_to <= 10.0) & land
+            if mode == 'exo':
+                dyke &= (d_o > 60.0)                       # 出口走廊豁免
+            low = dyke & (dem < z_far + 20.0)
+            if low.any():
+                ramp2 = (z_far + 20.0) * np.exp(-(d_to - 0.5) / 3.5)
+                dem = np.maximum(dem, np.where(low, ramp2, -np.inf)).astype(np.float32)
+                dem[~land] = np.minimum(dem[~land], 0.0)
+            dem = (dem * (1 - w) + z_b * w).astype(np.float32)   # 倾斜面装配
+            if mode == 'exo':                              # 河网树走廊 (拓扑构造):
+                ys_c, xs_c = np.nonzero(mask)              # 装配后下切, 防 w 混合
+                cy, cx = float(ys_c.mean()), float(xs_c.mean())  # 覆盖河道
+                def _carve(p0, p1, depth_m, w_px, wav):
+                    """p0→p1 河道走廊: 正弦弯曲 + 沿程下切 depth_m, 宽 w_px"""
+                    nonlocal dem
+                    n = max(8, int(np.hypot(p1[0] - p0[0], p1[1] - p0[1]) * 1.4))
+                    ts = np.linspace(0, 1, n)
+                    perp = np.array([-(p1[1] - p0[1]), p1[0] - p0[0]], np.float64)
+                    perp /= (np.hypot(*perp) + 1e-9)
+                    wig = wav * np.sin(ts * np.pi * rng.uniform(1.5, 2.5)
+                                       + rng.uniform(0, 6.28)) * np.sin(ts * np.pi)
+                    yy = p0[0] + ts * (p1[0] - p0[0]) + wig * perp[0]
+                    xx = p0[1] + ts * (p1[1] - p0[1]) + wig * perp[1]
+                    pts = np.zeros((S, W), bool)
+                    yi = np.clip(yy.round().astype(int) % S, 0, S - 1)
+                    xi = np.clip(xx.round().astype(int) % W, 0, W - 1)
+                    pts[yi, xi] = True
+                    d_l = _edt_to(pts)                     # 距河道中心线
+                    cor = (d_l <= w_px) & land
+                    if cor.any():
+                        frac = np.clip(d_l / max(w_px, 1.0), 0, 1)  # 边缘浅
+                        z_riv = z_out + 1.8 * d_o - depth_m * (1 - frac)
+                        z_riv = np.maximum(z_riv, 5.0)
+                        # M6: 强制河床 (set 而非仅下切) — 出口-盆间低洼段
+                        # 若只切不抬会形成并行通道分流; 全走廊设床=堤化河道
+                        dem = np.where(cor, z_riv.astype(np.float32), dem)
+                    return pts
+                _carve((oy, ox), (cy, cx), 55.0, 5.0, 6.0)             # 主干
+                # 3 条支干: 主干中段 → mask 内随机远点
+                for k in range(3):
+                    t = rng.uniform(0.3, 0.75)
+                    b0 = (oy + t * (cy - oy), ox + t * (cx - ox))
+                    q = int(rng.uniform(0, ys_c.size))
+                    _carve(b0, (float(ys_c[q]), float(xs_c[q])),
+                           40.0, 3.5, 8.0)
+            if mode == 'exo':
+                n_exo += 1
+            else:
+                n_endo += 1
+            info.append(f"{mode}{mask.sum() / n_land * 100:.1f}%@({oy // f},{ox // f})")
+            if n_exo >= max_exo and (not endorheic or n_endo >= 1):
+                break
+        if n_exo + n_endo >= 2:
+            break
+    return dem, len(info), "; ".join(info)
 
 
 # ==================== 10. 验证指标套件 (A7) ====================

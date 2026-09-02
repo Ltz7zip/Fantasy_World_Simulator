@@ -1,9 +1,15 @@
 # -*- coding: utf-8 -*-
 # ======================================================================
-# generate_world.py v6.3 —— 板块演化模拟世界生成器
-# 一级: run_plate_sim (450 Myr, 有缓存) → 粗DEM + 4构造场
+# generate_world.py v6.6 —— 板块演化模拟世界生成器
+# 一级: run_plate_sim v2.2 (450 Myr, 有缓存) → 粗DEM + 4构造场
+#       海洋直方图标定(年龄分位→地球开阔洋深度) + 陆架剖面化 + 窄海沟
 # 二级: 12通道条件 → 逐瓦片重训版GAN → 低频对齐 → 全局CDF匹配
-#       → 全球D8河网 → 雪线渲染     运行: python generate_world.py --seed 7 --size 2048
+#       → 全球D8河网 → 雪线渲染
+# v6.6 检验修复层 (基于10种子七维地理检验报告):
+#   P0 陆架-陆坡剖面修复 + 陆地直方图重映射(→地球实测分位)
+#   P1 岛弧链/热点岛链盖章 + 干流河谷雕刻
+#   P2 板内造山带盖章(打破山地-俯冲带过纯耦合)
+# 运行: python generate_world.py --seed 7 --size 2048
 # ======================================================================
 import os
 import time
@@ -20,7 +26,13 @@ from terrain_engine import (device, m2v, v2m, block_reduce, d8_flow_accumulation
                             polar_ice_mask, make_terrain_cmap, UNet,
                             temperature_field, precipitation_field, whittaker_biome,
                             BIOME_COLORS, fill_depressions, droplet_erosion,
-                            periodic_fbm, warp_lonlat)
+                            periodic_fbm, warp_lonlat,
+                            land_hist_match, ocean_margin_fix, add_island_arcs,
+                            add_hotspot_chains, add_intraplate_orogen,
+                            carve_trunk_rivers, land_hist_final,
+                            carve_fjords, add_shelf_peninsulas,
+                            add_coral_reefs, ocean_current_effects,
+                            add_craton_basins, ocean_hist_final)
 from plate_sim import run_plate_sim
 
 
@@ -74,8 +86,9 @@ def render_world(v01, lats, landS, cmap, rng):
     S = v01.shape[0]
     land = v01 >= 0.5
     elev_m = v2m(v01)
-    T = temperature_field(lats, elev_m)
-    P = precipitation_field(lats, elev_m, rng)
+    dT, dP = ocean_current_effects(elev_m, lats)     # M4 洋流/季风气候效应
+    T = temperature_field(lats, elev_m, dT)
+    P = precipitation_field(lats, elev_m, rng, dP)
     bi = whittaker_biome(T, P)
     # 山体阴影 (NW 光照, 仅陆地) → 地形层次感
     g = gaussian_filter(v01, 1.5)
@@ -163,36 +176,67 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
     step, ovp = tb - ovb, ovb * block
 
     print(f"[1/4] 板块演化模拟 (T={tect_res}, 450 Myr, 有缓存)...")
-    cache = os.path.join(_dir, "cache", f"plate_sim_v2_T{tect_res}_seed{seed}.npz")
+    cache = os.path.join(_dir, "cache", f"plate_sim_v3_T{tect_res}_seed{seed}.npz")
     if os.path.exists(cache):
         d = np.load(cache)
         elev_T, tect_T, crust_T = d["elev"], d["tect"], d["crust"]
+        margin_T = d["margin"] if "margin" in d.files else None
+        belt_T = d["belt"] if "belt" in d.files else None
+        rift_T = d["rift"] if "rift" in d.files else None
         print(f"      载入缓存 {os.path.basename(cache)}")
     else:
-        elev_T, tect_T, crust_T = run_plate_sim(T=tect_res, seed=seed)
-        np.savez_compressed(cache, elev=elev_T, tect=tect_T, crust=crust_T)
+        elev_T, tect_T, crust_T, margin_T, belt_T, rift_T = run_plate_sim(
+            T=tect_res, seed=seed)
+        np.savez_compressed(cache, elev=elev_T, tect=tect_T, crust=crust_T,
+                            margin=margin_T, belt=belt_T, rift=rift_T)
 
     up = size_px // tect_res
     rng = np.random.RandomState(seed + 5)
     lats = (-90.0 + (np.arange(size_px) + 0.5) * (180.0 / size_px)).astype(np.float32)
     # v6.5: 板块骨架域扭曲 (周期fBm, 数据线无缝) → 边界/海岸弧形化, 消"细胞壁"直线
-    wxT = periodic_fbm(tect_res, 6.0, 3, rng) * 16.0 + periodic_fbm(tect_res, 20.0, 2, rng) * 4.0
-    wyT = periodic_fbm(tect_res, 6.0, 3, rng) * 16.0 + periodic_fbm(tect_res, 20.0, 2, rng) * 4.0
+    # v7.0: 强度 16→11px (16px 会把裂谷端部窄缝的大陆桥接成单块)
+    wxT = periodic_fbm(tect_res, 6.0, 3, rng) * 11.0 + periodic_fbm(tect_res, 20.0, 2, rng) * 3.0
+    wyT = periodic_fbm(tect_res, 6.0, 3, rng) * 11.0 + periodic_fbm(tect_res, 20.0, 2, rng) * 3.0
     elev_T = warp_lonlat(elev_T.astype(np.float32), wxT, wyT, 1.0)
     tect_T = np.stack([warp_lonlat(tect_T[i], wxT, wyT, 1.0) for i in range(4)])
     crust_T = warp_lonlat(crust_T.astype(np.float32), wxT, wyT, 1.0)
+    # v3.0 margin_type 同步扭曲+上采样 (被动/主动边缘分化)
+    if margin_T is not None:
+        margin_T = warp_lonlat(margin_T.astype(np.float32), wxT, wyT, 1.0)
+        margin_up = np.clip(ndi_zoom(margin_T, up, order=0)[:size_px, :size_px],
+                            0, 2).astype(np.int8)
+    else:
+        margin_up = None
+    # M2 延展山带同步扭曲+上采样 → 骨架山脉纹理沿带走向
+    if belt_T is not None:
+        belt_T = warp_lonlat(belt_T.astype(np.float32), wxT, wyT, 1.0)
+        beltS = np.clip(ndi_zoom(belt_T, up, order=1)[:size_px, :size_px],
+                        0, 1).astype(np.float32)
+    else:
+        beltS = np.zeros((size_px, size_px), np.float32)
+    # M2 失败裂谷场同步扭曲+上采样 (直方图终检后重新下切用)
+    if rift_T is not None:
+        rift_T = warp_lonlat(rift_T.astype(np.float32), wxT, wyT, 1.0)
+        riftS = np.clip(ndi_zoom(rift_T, up, order=1)[:size_px, :size_px],
+                        0, 1).astype(np.float32)
+    else:
+        riftS = np.zeros((size_px, size_px), np.float32)
     elev_m = ndi_zoom(elev_T, up, order=1)[:size_px, :size_px].astype(np.float32)
     # 像素级细节: 山体纹理跟随构造场 + 海岸分形噪声(基于连续crust概率场, 非二值)
     envS = np.clip(ndi_zoom(tect_T[1], up, order=1), 0, 1)[:size_px, :size_px]
     cf = gaussian_filter(crust_T, 2.0)
     cf = ndi_zoom(cf, up, order=1)[:size_px, :size_px]
     # 海岸带(420m 半高宽) 分形级联 D≈1.3: 宏观湾/半岛 → 岬角 → 碎屑岸逐级细化
+    # v7.0: 海洋侧幅度减半 → 陆架浅海不被噪声大量转陆 (land_frac 超标源头)
     band = np.exp(-((np.abs(elev_m)) / 420.0) ** 2)
-    elev_m = elev_m + band * 480.0 * (cf - 0.5)          # 宏观: 大湾/半岛 (扭曲后不规则)
+    band_o = band * np.where(elev_m < 0, 0.5, 1.0)       # 海侧噪声减半
+    elev_m = elev_m + band_o * 480.0 * (cf - 0.5)        # 宏观: 大湾/半岛 (扭曲后不规则)
     elev_m += 190.0 * value_fbm(size_px, 24.0, 4, rng=rng)
     # 山脉: 束状分支(脊状fBm) + 宽度空间变化 → 消"贴边条"直线感
+    # M2: 纹理场 = max(构造场, 0.85×延展山带) → 像素级山体沿延展带走向连续
     wvar = np.clip(1.0 + 0.9 * value_fbm(size_px, 5.0, 3, rng=rng), 0.25, 2.0)
-    elev_m += 700.0 * envS * wvar * (ridged_fbm(size_px, base_freq=14.0, octaves=4, rng=rng) ** 2)
+    elev_m += 700.0 * np.maximum(envS, 0.85 * beltS) * wvar \
+              * (ridged_fbm(size_px, base_freq=14.0, octaves=4, rng=rng) ** 2)
     elev_m += band * 300.0 * (value_fbm(size_px, 34.0, 3, rng=rng) - 0.35)   # 中观: 岬角/海湾
     elev_m += band * 150.0 * (value_fbm(size_px, 90.0, 2, rng=rng) - 0.3)
     elev_m += band * 85.0 * (value_fbm(size_px, 200.0, 2, rng=rng) - 0.28)   # 细观: 碎屑岸
@@ -205,6 +249,12 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
     deep_int = np.clip((d_in - 130.0) / 240.0, 0, 1)
     basins = np.clip(value_fbm(size_px, 6.0, 3, rng=rng) - 1.0, 0, None)
     elev_m = elev_m - 1600.0 * deep_int * basins
+    # ---- v6.6 检验修复层 (七大地理维度对齐) ----
+    elev_m = ocean_margin_fix(elev_m, envS)                # P0 陆架-陆坡剖面修复
+    elev_m = add_intraplate_orogen(elev_m, cf, envS, rng)  # P2 板内造山(参与直方图)
+    elev_m = land_hist_match(elev_m, lats)                 # P0 陆地直方图 → 地球实测(加权)
+    elev_m = add_island_arcs(elev_m, envS, cf, rng)        # P1 岛弧链 (俯冲带大陆侧)
+    elev_m = add_hotspot_chains(elev_m, rng)               # P1 热点岛链 (夏威夷型)
     elev_m = np.clip(elev_m, -10500, 8900).astype(np.float32)
     landS = elev_m > 0
     plt.imsave(os.path.join(_dir, "output", "world_skeleton.png"),
@@ -248,7 +298,7 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
             # 0.46仍在海平面附近, 会把深海钳成浅海; 这版直接钳回深海)
             lf_up = ndi_zoom(pad2(lf[sl], (py, px_)), block, order=1)[:256, :256]
             bm_up = ndi_zoom(pad2(sm_(bm[sl]), (py, px_)), block, order=1)[:256, :256]
-            sea_m = lf_up < 0.02
+            sea_m = lf_up < 0.006                   # v6.6: 放宽→保住岛弧/小岛
             cap_m = np.where(sea_m, np.maximum(bm_up + 0.06, 0.12), 1.0)
             s = np.minimum(s, cap_m).astype(np.float32)
 
@@ -270,9 +320,19 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
     out = global_envelope_match(out, bm, bstd, bmin, bmax, glac, block,
                                 blend=0.60, seed=seed, cap_m=8200.0)
     out = lowfreq_consistency(out, bm, block, iters=2)
-    out = despeckle(out, min_area=64)
+    out = despeckle(out, min_area=32)             # v6.6: 64→32 保住岛弧小岛
     out = droplet_erosion(out, rng=np.random.default_rng(seed + 77))   # V形谷/冲积扇
-    out = sharpen_coastline(out)
+    out = np.clip(out + 0.016 * value_fbm(size_px, 110.0, 2,
+                    rng=np.random.RandomState(seed + 3)) * (out >= 0.5),
+                  0, 1).astype(np.float32)        # v6.6 高频细节(提PSD)
+    out = carve_trunk_rivers(out, np.random.RandomState(seed + 55))    # v6.6 干流河谷
+    # v6.6: 窄带海岸锐化(±0.008v≈±160m) → 不再压掉陆架/抬升陆地直方图
+    out = sharpen_coastline(out, band=0.008, expand=0.03)
+    # M3 峡湾雕刻: 高纬被动边缘 U 形谷 (斯堪的纳维亚型), 锐化后/陆架终检前
+    if margin_up is not None:
+        out = m2v(carve_fjords(v2m(out), lats, margin_up,
+                               np.random.RandomState(seed + 41)))
+    out = m2v(ocean_margin_fix(v2m(out), envS, margin_up))   # v6.6 陆架终检(v3.0边缘分化)
     ice = polar_ice_mask(lats, out)
     filled = fill_depressions(out)                                     # 河网连通
     acc = d8_flow_accumulation(filled, np.random.RandomState(seed + 31))
@@ -280,8 +340,38 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
     t = np.clip(np.log(np.maximum(acc, 1.0001)) / np.log(thr), 0, 1)
     landness = np.clip((out - 0.5) / 0.02, 0, 1)
     out = np.clip(out - 0.035 * (t ** 0.8) * landness * (~ice), 0, 1).astype(np.float32)
+    out = land_hist_final(out, lats)              # v6.6 陆地直方图终检(绝对最后,加权)
+    # M2 失败裂谷重新下切: GAN/直方图重排会抹掉骨架版谷地 → rift 场
+    # (轴剖面: 轴线1→两侧衰减) 直乘深度, 谷形集中 (东非型);
+    # 谷底整体低于两侧 + 轴线稀疏火山峰 (乞力马扎罗型)
+    if riftS.any():
+        valley = 0.055 * riftS                     # ≈1100m 谷底 (东非裂谷谷底-周边 700-1500m)
+        out = np.clip(out - valley * (out >= 0.5), 0, 1).astype(np.float32)
+        volc = (riftS > 0.75) & (out >= 0.5) \
+               & (value_fbm(size_px, 40.0, 2, rng=np.random.RandomState(seed + 9))
+                  > 0.55)
+        out = np.clip(out + 0.030 * volc, 0, 1).astype(np.float32)
 
+    # M5 克拉通大流域盆地 (直方图终检后盖章 — 终检全局重排会扭曲河网梯度):
+    # 稳定陆内低地 → 单一出口倾斜面 + 河网树 (亚马逊/刚果型)
+    # + 内陆海 (里海型); 输入已是最终直方图 → 盖章值即终值
+    dem_b, n_b, b_info = add_craton_basins(v2m(out), envS,
+                                           np.random.RandomState(seed + 66),
+                                           belt=beltS, lats=lats)
+    if n_b:
+        out = m2v(dem_b)
+        print(f"      M5 大流域盆地: {n_b}个 [{b_info}]")
+
+    # ---- M3 边缘地貌终章 (直方图终检后, 最后盖章不被重排) ----
     dem_m = v2m(out)
+    if margin_up is not None:
+        dem_m, n_pen = add_shelf_peninsulas(dem_m, margin_up, cf, rng,
+                                            lats=lats)   # 台地半岛+大陆岛
+        print(f"      M3 台地露头(半岛/大陆岛): {n_pen}px")
+    dem_m = add_coral_reefs(dem_m, lats, np.random.RandomState(seed + 88))  # 珊瑚礁
+    dem_m = ocean_hist_final(dem_m, lats)      # M6 深洋直方图终检 (最后, 深带校准)
+    out = m2v(dem_m)
+
     np.save(out_npy, dem_m.astype(np.float32))
     plt.imsave(out_png, render_world(out, lats, landS, make_terrain_cmap(),
                                      np.random.RandomState(seed)))
