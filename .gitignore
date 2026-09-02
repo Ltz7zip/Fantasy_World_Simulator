@@ -11,3 +11,9 @@ terrain/output/
 # 虚拟环境与 IDE
 .venv/
 .idea/
+.vscode/
+.DS_Store
+
+# TRAE 工作区私有目录（.trae/skills 为本地 Skill 定义，不跨机器共享）
+.trae/
+

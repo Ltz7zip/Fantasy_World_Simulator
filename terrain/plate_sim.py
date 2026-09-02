@@ -237,9 +237,59 @@ def run_plate_sim(T=512, seed=0, K=12, n_hs=7,
                   dt=0.625, steps=720, verbose=True, land_target=0.31,
                   step_agg_end=None, step_rift=None, step_rift2=None,
                   re_v=60, n_micro=None):
-    """v3.0 超大陆旋回: 聚合(step<step_agg_end) → 超大陆(→step_rift)
-    → 主裂谷分离(→step_rift2) → 次裂谷分离(→steps)。
-    返回 (elev, tect, crustm, margin): margin 0=普通 1=被动边缘 2=主动边缘"""
+    """**板块演化主入口 v3.0**：球面三阶段超大陆旋回 → 粗 DEM + 4 构造场 + 陆壳 + 边缘类型。
+
+    三阶段时间轴（默认 dt=0.625 Myr × 720 步 = 450 Myr 总演化）：
+        0. 聚合期 (step < step_agg_end，默认 0~240)：板块共享一个欧拉聚合中心 c 做
+           大圆漂移，产生初始碰撞 → 焊接合并（相邻 < 2px 的板块并入，滞留板块豁免）。
+        1. 超大陆稳定期 (step_agg_end ~ step_rift)：持续向心挤压 → orog 场累积，
+           碰撞带峰值（为后续 4900m 碰撞造山做历史累积）。
+        2. 主裂解 (step_rift ~ step_rift2，默认 416~544)：沿随机大圆把最大陆板块
+           切成两半，两块共享同一欧拉轴反向 ±om_s 对旋 → 大西洋型对称张开。
+        3. 次裂解 (step_rift2 ~ steps)：再对另一大陆进行第二刀，产生印度洋 /
+           南大西洋型二次洋盆 + 裂谷谷地带。
+
+    核心机制（详见 TECHNICAL §2）：
+        - 2 块滞留极地板块（南极 / 格陵兰型，保证极地陆量 ≥ 12%）。
+        - 4~6 块微大陆 / 地体 延迟 t>100Myr 撞入（印度型半岛 / 马达加斯加型岛）。
+        - 大陆陆地全局守恒：复制/湮灭对称增删 + 海岸剥蚀到 land_target ≈ 0.31。
+        - 输出 margin_type（0 普通 / 1 被动边缘 / 2 主动边缘）供下游陆架分化。
+
+    Parameters
+    ----------
+    T : int
+        球面网格分辨率（单边像素数），与 generate_world 的 tect_res 一致；默认 512。
+    seed : int
+        随机种子。同一 seed 两次调用**严格一致**（板块配置 / 速度场 / 陆壳分布）。
+    K : int
+        主板块数（默认 12）。加上 4~6 块微大陆，总板块池 = MAXP = K + 16。
+    n_hs : int
+        初始热点（火山链）数量。生成年龄记忆场用于后续热点岛链盖章。
+    dt : float
+        每步模拟的 Myr（默认 0.625 = 720 步 × dt ≈ 450 Myr）。
+    steps : int
+        总模拟步数（默认 720）。
+    verbose : bool
+        是否打印阶段进度日志（默认 True）。
+    land_target : float
+        目标陆地面积占比（默认 0.31，靠近地球 0.29）。陆地守恒 + 硬剥皮双保险。
+    step_agg_end / step_rift / step_rift2 : int or None
+        三阶段切换步；空取默认值 150/260/340 Myr 对应步长换算结果。
+    re_v : int
+        俯冲带 / 海沟 / 造山带的"地形强度"尺度参数（v2.2 = 60，越大造山越高）。
+    n_micro : int or None
+        微大陆 / 地体数量；空时在 4~6 中随机。
+
+    Returns
+    -------
+    tuple (elev, tect, crustm, margin, belt, rift)
+        - elev    : (T, T) float32, 米制粗 DEM（钳制在 ±10500/8900 之前的原始骨架）
+        - tect    : (4, T, T) float32, 4 构造场 [俯冲碰撞/离散/转换/余裕]
+        - crustm  : (T, T) float32, 陆壳概率 [0, 1]（连续场，非二值）
+        - margin  : (T, T) int8, 边缘类型 0=普通 1=被动 2=主动
+        - belt    : (T, T) float32, 延展山带（板内造山 / 碰撞带走向）
+        - rift    : (T, T) float32, 失败裂谷场（供裂谷重新下切）
+    """
     rng = np.random.RandomState(seed)
     ii, jj = np.mgrid[0:T, 0:T].astype(np.float64)
     lat_g = (0.5 - (ii + 0.5) / T) * np.pi

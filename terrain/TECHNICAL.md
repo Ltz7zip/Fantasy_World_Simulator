@@ -202,18 +202,21 @@ T = 27 − 0.42·|lat| − 6.5·(elev/1000) − 22·clip((|lat|−55)/35, 0, 1)�
 
 | 文件 | 用途 |
 |------|------|
-| `plate_sim.py` | 板块演化模拟 v2.2（缓存 `cache/plate_sim_v22_T512_seed*.npz`） |
+| `plate_sim.py` | 板块演化模拟 **v3.0 超大陆旋回**（缓存 `cache/plate_sim_v3_T512_seed*.npz`） |
 | `tectonics.py` | Bird 2003 真实边界 → 构造条件场（训练用，缓存 `cache/tect_cache_*.npz`） |
-| `terrain_engine.py` | 归一化/气候/侵蚀/后处理/网络/训练 + v6.6 修复层函数 |
-| `generate_world.py` | 世界生成主入口 |
+| `terrain_engine.py` | 归一化/气候/侵蚀/后处理/网络/训练 + v6.6 修复层 + v7.0 洋流/季风/冰盖 |
+| `generate_world.py` | 世界生成主入口（管线编排 + 渲染 + 产物落盘） |
+| `geo_context.py` | **新增 v7.0**：`WorldGeoContext` 单例 —— DEM 懒加载 / 坐标转换 / 双线性查询 / KPI 统计 / 多边形裁切 |
+| `visualize_context.py` | **新增 v7.0**：4 面板 PNG + 单文件离线交互 HTML 报告（探针点/多边形/剖面联动） |
 | `rerender.py` | 仅重渲染（不动 DEM） |
 | `batch_gen.py` | 批量生成多种子地图（检验用） |
 | `analyze_worlds.py` | 七大地理维度指标 vs 真实地球同口径分析（输出 analysis_results.json） |
 | `make_montage.py` | 真实地球(同风格渲染)+N 种子对比拼图 |
-| `data/` | ETOPO1 全球 DEM、PB2002 板块边界（重训数据源） |
-| `checkpoints/` | GAN 权重 |
-| `cache/` | 板块演化与构造场缓存（可再生） |
-| `output/` | world_dem.npy / world_map.png / world_skeleton.png / seed*_*.npy, png |
+| `tests/test_visualize_context.py` | pytest 33 项：参数解析 / 单例缓存 / figure 冒烟 / latlon 往返 / CLI 主流程 / Protocol 合规 |
+| `data/` | ETOPO1 全球 DEM、PB2002 板块边界（重训数据源，生成世界不需要） |
+| `checkpoints/` | GAN 权重 `best_terrain_gan_v5.pth`（12 通道条件 GAN，UNet in_ch=12, base=32） |
+| `cache/` | 板块演化与构造场缓存（100% 可再生，删了只是变慢） |
+| `output/` | `world_dem.npy` / `world_map.png` / `world_skeleton.png` / `geoctx_visual_seed{}.png` / `geoctx_report_seed{}.html` |
 
 ---
 
@@ -539,3 +542,266 @@ T = 27 − 0.42·|lat| − 6.5·(elev/1000) − 22·clip((|lat|−55)/35, 0, 1)�
 2. **corr_conv_elev_land**: 地球负相关源自南极/格陵兰冰盖高海拔+零收敛
    面积权重, 生成图无此冰盖特例, 属目标侧特性而非缺陷
 3. **nh_land_share**: 方差大 (±10%), 单半球超大陆模型的固有分布宽度
+
+---
+
+## 16. WorldGeoContext 单例 (geo_context.py, v7.0 新增)
+
+面向"后续消费 DEM 数据"的统一查询入口。避免每个调用方都手动 `numpy.load('world_dem.npy')` + 写坐标换算 + 双线性插值。
+
+### 16.1 设计原则 —— Singleton + Protocol + 懒加载
+
+```
+调用方 → get_ctx(seed, size)
+            └─▶ WorldGeoContext.from_seed(seed, size) [单例: 同 seed+size 永远返回同一对象]
+                    │
+                    ├─ 1) 检查 output/ 下是否有 world_dem.npy 同 seed+size
+                    │     · 有 → np.load 懒加载 (首次访问 .dem 才真正读入内存, ≈16MB/2048²)
+                    │     · 无 → 调用 _generate_world_safe() 启动 generate_world 管线 (约 2-4 分钟)
+                    ├─ 2) 计算 lat/lon 网格轴 + _GEO_BOUNDS (-11000 ~ 9000m, 非 inf)
+                    └─ 3) 缓存 slope 场（deg→km 坡度, 用 cos(lat) 对经度微分做地球球面校正）
+
+外部替换地形引擎：实现 TerrainDataProtocol（get_elevation / get_slope / latlon_to_idx 等 8 个方法）
+即可无缝替换 WorldGeoContext，可视化 / 分析 / 导出工具链零改动。
+```
+
+### 16.2 核心数据
+
+| 字段 | 形状 / 类型 | 说明 |
+|------|-----------|------|
+| `.seed` / `.size` / `.dem_path` | int / int / `Path` | 生成参数 + 实际 DEM 路径 |
+| `.dem` | `(S, S)` float32, 米制 | 高程（懒加载）。正值陆地 / 负值海洋；行 0 = 北纬 90° − 半格距，行 S−1 = 南纬 −90° + 半格距 |
+| `.slope_field` | `(S, S)` float32, **度** | 坡度（懒计算）。0°=平地，45°=1，90°=悬崖 |
+| `.geozone` | `(S, S)` uint8 | 地理带分级（见 §7 生物群系 + 海沟/洋中脊掩膜组合） |
+| `.crust_type` | `(S, S)` uint8 | 陆壳(1) / 洋壳(0) |
+| `.lats` / `.lons` | `(S,)` float64 | 每行/列对应的经纬度（与 DEM 像素中心对齐） |
+
+### 16.3 坐标转换约定
+
+所有转换都走**像素中心 → 地理坐标**的一一映射（`round` 而非 `floor`，保证 `latlon_to_idx(idx_to_latlon(r, c)) == (r, c)` 严格往返）。
+
+```
+行 r ∈ [0, S−1]  →  lat(r) =  90 − (r + 0.5) × 180/S     (北半球在 r 小时)
+列 c ∈ [0, S−1]  →  lon(c) = −180 + (c + 0.5) × 360/S     (经度 0° 在 c≈S/2)
+```
+
+### 16.4 关键 API
+
+| API | 签名 | 说明 |
+|-----|------|------|
+| `get_ctx()` | `get_ctx(seed=0, size=2048) -> WorldGeoContext` | 便捷入口：等价 `from_seed`，缓存 100% |
+| `from_seed()` | `classmethod from_seed(seed, size, force_reload=False) -> WorldGeoContext` | 单例构造 |
+| `reset()` | `classmethod reset()` | 清掉单例（跑测试 / 强制重算时用） |
+| `latlon_to_idx` | `(lat, lon) -> (r, c)`  int | 经纬度 → 最近像素行列（round） |
+| `idx_to_latlon` | `(r, c) -> (lat, lon)`  float | 像素行列 → 中心点经纬度 |
+| `get_elevation` | `(lat, lon) -> float 米` | **双线性插值**，任意连续经纬度 |
+| `get_slope` | `(lat, lon) -> float 度` | 同上，球面校正后的坡度 |
+| `is_land` | `(lat, lon, threshold=0.0) -> bool` | 是否陆地（默认 ≥ 0m） |
+| `region_stats` | `region_stats(polygon: List[(lat,lon)]) -> dict` | 多边形内统计：点数 / 陆地占比 / 洋壳% / 山地% / 平均海拔 / 最大海拔 |
+| `summary_stats` | `property -> dict` | 全球 KPI：`land_ratio, mont_ratio, peak, trough, ...`（与 HTML 报告 7 张 KPI 同源） |
+
+---
+
+## 17. 可视化与交互 HTML 报告 (visualize_context.py, v7.0 新增)
+
+两阶段产物：4 面板 PNG（适合邮件/PPT 展示）+ 单文件 HTML（适合交互探索 / 网页分发）。
+
+### 17.1 4 面板 PNG 布局（`build_geo_figure`）
+
+```
+┌────────────────────┬────────────────────┐
+│   1) 高程 Colormap   │   2) 坡度 Colormap   │  dpi=120 (默认), 2 行 2 列
+│  (viridis, -11~9 km) │  (绿-黄-红, 0~45°)   │  右上角显示 7 张 KPI
+├────────────────────┼────────────────────┤
+│   3) GeoZone 分级     │   4) A→B 剖面线      │  3 地理带色图：海沟/洋脊/平原/台地/山地
+│  (地图学 9 档配色)    │  Elev (蓝) + Slope(橙) │  横轴大圆弧距离 (km), Canvas/折线
+└────────────────────┴────────────────────┘
+  - 探针点：表格形式附在 PNG 底部（每点 纬度/经度/海拔/坡度）
+  - 多边形：3 面板中叠加半透明红色边框 poly-grid 覆盖
+```
+
+### 17.2 单文件交互 HTML 结构（`build_html_report` / `export_html_report`）
+
+**设计目标**：完全离线（零外链 / 零 CDN）、单文件（双击即打开）、4.3 MB 级别（可邮件附件 / HTTP 一次性加载）。
+
+```
+<title>KPI 7 卡片</title>
+
+<body>
+  ├─ 顶栏：标题 / seed / DEM 尺寸 / 生成时间 (cmd)
+  │
+  ├─ 7 张 KPI (陆地占比 / 山地占比 / 最高峰 / 最深沟 / 探针点数 / DEM网格 / 查询精度)
+  │
+  ├─ Card 1 · 全球交互查询
+  │    ├─ 图层切换 Tab：[高程] / [坡度] / [地理带]  (3 张内联 PNG base64 图层, 默认 1024² ≈ 1.4 MB)
+  │    ├─ 地图悬停 tooltip（JS 双线性查询 512² float32 DEM/SLP 查询网格 → 显示经纬度/海拔/坡度/🌲陆地🌊海洋）
+  │    ├─ 双击地图任意位置：把该点加入探针点表（goTo 联动）
+  │    ├─ 地图 marker：probe-marker land (🌲) / probe-marker sea (🌊)
+  │    └─ 多边形叠加：半透明 poly-grid + 统计 Pill（面积 / 陆地占比）
+  │
+  ├─ Card 2 · 探针点表（可点击跳转 goTo(lat,lon) 高亮地图 tooltip 十字）
+  │    ├─ 列：编号 / 名称 / 纬度 / 经度 / 海拔 / 坡度
+  │    └─ tr.data-lat, data-lon
+  │
+  ├─ Card 3 · 剖面交互 Canvas
+  │    ├─ 左轴：海拔 (m, 蓝实线 + 陆地填充)，右轴：坡度 (°, 橙虚线)
+  │    ├─ 鼠标悬停 → 十字线高亮 + 联动地图同一经纬度 (onMapMove + fillRegion)
+  │    └─ 顶部 Pill：A → B 总距离 ≈ xxxxx km (haversine 大圆)
+  │
+  └─ 所有交互都基于纯 Vanilla JS + Canvas (无 Chart.js/Leaflet)，14 个核心函数。
+```
+
+### 17.3 HTML 编码链（保证离线可读）
+
+```
+原始 DEM (S×S float32, 米) ─scipy.ndimage.zoom 双线性─▶  target_size × target_size
+     │                                                               │
+     │  (1) 高程/坡度/地理带 三色图                                      │  (2) 查询网格 float32
+     ├─▶ Normalize → Colormap → PIL Image → PNG bytes → base64  ─────▶ 嵌入 <img src="data:image/png;base64,..."> 3 张
+     └─▶ bytes(SxSx4) float32 → base64.b64encode ──────────────▶ 嵌入 const DEM_Q / SLP_Q = decodeF32Grid("...")
+                                                                         │
+                                                                         ▼
+                                                                   JS 端 blin(r, c) 双线性插值
+                                                                   （O(1), 鼠标移动 60fps 无压力）
+```
+
+---
+
+## 18. 接口定义汇总（面向开发者的 Python API）
+
+### 18.1 世界生成
+
+```python
+# generate_world.py
+def generate_world(
+    seed: int = 0,
+    size_px: int = 2048,           # 2048 或 4096
+    ckpt_path: str | None = None,  # 覆盖默认 checkpoints/best_terrain_gan_v5.pth
+    output_dir: str | None = None, # 覆盖默认 terrain/output/
+    skip_gan: bool = False,        # 只跑到骨架 (skeleton.png)，不做 GAN 细化
+) -> dict[str, Any]:
+    """主入口：执行完整管线，返回全局 KPI + 产物路径。"""
+    # 返回 {"seed","size","dem_path","map_path","skeleton_path","summary_stats":{...}}
+```
+
+### 18.2 单例查询上下文（geo_context.py）
+
+```python
+from terrain.geo_context import WorldGeoContext, get_ctx
+
+ctx = get_ctx(seed=1, size=2048)
+
+# ========== 类方法（单例生命周期）==========
+WorldGeoContext.from_seed(seed: int, size: int, force_reload: bool = False) -> "WorldGeoContext"
+WorldGeoContext.reset() -> None                       # 清空单例 (测试)
+
+# ========== 坐标 ==========
+ctx.latlon_to_idx(lat: float, lon: float) -> tuple[int, int]
+ctx.idx_to_latlon(r: int, c: int) -> tuple[float, float]
+
+# ========== 查询 (任意经纬度, 双线性插值) ==========
+ctx.get_elevation(lat: float, lon: float) -> float      # 米，正值=陆地
+ctx.get_slope(lat: float, lon: float) -> float          # 角度 (0..≈90)
+ctx.is_land(lat: float, lon: float, threshold: float = 0.0) -> bool
+ctx.get_crust_type(lat: float, lon: float) -> int       # 0=洋壳 / 1=陆壳 / 2=陆架
+
+# ========== 统计 ==========
+@property ctx.summary_stats -> dict                     # 全球 KPI (7 项)
+ctx.region_stats(polygon: list[tuple[float, float]] | None = None) -> dict[str, float]
+```
+
+### 18.3 可视化 + HTML 导出（visualize_context.py）
+
+```python
+from terrain.visualize_context import build_geo_figure, export_html_report, build_html_report
+
+# ===== PNG 4 面板 =====
+fig, info, ax4, profile_data = build_geo_figure(
+    seed=1, size=2048,
+    probe_points: list[tuple[float,float,str]] | None=None,  # [(lat,lon,name), ...]
+    profile: tuple[tuple,tuple] | None=None,                 # ((latA,lonA),(latB,lonB))
+    polygon: list[tuple[float,float]] | None=None,           # [(lat,lon), ...] 自动闭合
+    downsample_for_display: int=1,                           # 4096 时可设 2，加速 PNG 绘图
+    dpi: int=120,
+)
+
+# ===== HTML 字符串 (不写磁盘，便于 HTTP 响应 / 上传) =====
+html_str, ctx = export_html_report(
+    ctx: WorldGeoContext,
+    probe_points=None, profile=None, polygon=None,
+    layer_size=1024, query_size=512,
+    cmd_line_str: str | None=None,   # HTML 顶栏显示的命令行日志
+) -> tuple[str, WorldGeoContext]
+
+# ===== HTML 写磁盘 =====
+actual_path, ctx = build_html_report(
+    seed: int, size=2048,
+    probe_points=None, profile=None, polygon=None,
+    output_path: str | None=None,          # None -> terrain/output/geoctx_report_seed{}.html
+    layer_size=1024, query_size=512,
+) -> tuple[str, WorldGeoContext]
+# 注：若 output_path 被 Excel/PDF 占用触发 PermissionError，会自动追加 _YYYYmmdd_HHMMSS 时间戳后缀。
+```
+
+---
+
+## 19. CLI 参数与配置汇总（全部脚本 × 默认值 × 说明）
+
+### 19.1 `python terrain/generate_world.py` 主入口
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--seed` | `0` | 世界种子，任意整数 |
+| `--size` / `--size-px` | `2048` | DEM 分辨率（`2048` 或 `4096`） |
+| `--ckpt` / `--ckpt-path` | `checkpoints/best_terrain_gan_v5.pth` | GAN 权重路径 |
+| `--output-dir` / `-o` | `terrain/output/` | 输出目录 |
+| `--skip-gan` | `False` | 只生成骨架（调试板块/造山带，跳过 GAN 的 40 秒 ~ 2 分钟） |
+| `--no-render` | `False` | 只算 DEM 不渲染 world_map.png（批量生成时提速） |
+
+### 19.2 `python terrain/visualize_context.py` 可视化 + HTML 报告
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--seed` | `1` | 种子 |
+| `--size` | `2048` | DEM 尺寸 |
+| `--output` | `terrain/output/geoctx_visual_seed{seed}.png` | PNG 输出路径 |
+| `--points` | 无 | 探针点 `"lat0,lon0[,name0],lat1,lon1[,name1],..."` (必须是纯数字坐标，中文为第三列可选 label) |
+| `--profile` | `"(90,-179,-90,179)"` 世界对角线 | 剖面 `"latA,lonA,latB,lonB"` |
+| `--poly` | 无 | 多边形 `"lat0,lon0,lat1,lon1,...,latN,lonN"`（偶数个 ≥ 6，自动闭合） |
+| `--downsample` | `1` | PNG 绘图降采样（4096 时设 2 加速） |
+| `--dpi` | `120` | PNG 分辨率 |
+| **`--html`** | `False` | **开关**：额外生成交互 HTML 报告（默认路径见下） |
+| **`--html-output`** | `None` | 显式指定 HTML 路径（自动隐含 --html） |
+| **`--html-layer-size`** | `1024` | HTML 三图层 PNG 分辨率（越大越清晰，文件越大；建议 1024/1536/2048） |
+| **`--html-query-size`** | `512` | HTML JS 悬停查询网格分辨率（越大越精确；建议 512/768/1024） |
+| **`--no-png`** | `False` | 只出 HTML 跳过 PNG（纯 HTML 场景提速 60%+） |
+
+### 19.3 `python terrain/plate_sim.py` 板块演化（单独调试）
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `--seed` | `0` | 种子 |
+| `--T` / `--res` | `512` | 模拟分辨率（与输出 DEM 的 tect-res 对齐；一般是 size/4） |
+| `--K` | `12` | 板块数量（含微大陆 4~6 块 / MAXP 池 = K+16） |
+| `--steps` | `720` | 演化步数（720 × 0.625 Myr = 450 Myr 总时长） |
+| `--out` | `cache/plate_sim_v3_T{res}_seed{seed}.npz` | 缓存路径（同参数第二次调用直接复用） |
+| `--plot` | `False` | 调试模式：输出 plate_debug.png（板块 id / orog / rift / margin） |
+
+### 19.4 其他常见脚本
+
+| 脚本 | 常用参数 | 说明 |
+|------|---------|------|
+| `rerender.py` | `--dem` / `--size` / `--out` | 仅重渲染 world_map.png（不重算 DEM；调渲染参数时反复用） |
+| `batch_gen.py` | `--seeds 1 2 3 4 5 ...` / `--size 2048` | 批量生成多种子；内部进程池并行，适合回归测试基线 |
+| `analyze_worlds.py` | `--glob "terrain/output/world_dem_seed*.npy"` / `--out analysis_results.json` | 七大维度 45+ 项地理指标 × 与 ETOPO1 同口径对比 |
+| `make_montage.py` | `--seeds 1 2 3 4` / `--cols 3` | 真实地球 (ETOPO1 同风格渲染) + N 种子并排对比拼图 |
+| `terrain_engine.py` 训练 | `--data ./data/ETOPO1...grd` / `--epochs 120` / `--batch 16` | 删除 checkpoint 后自动进入训练模式；需要 data/ ETOPO1 + PB2002 |
+
+### 19.5 环境变量（可选 override，一般不用）
+
+| 变量 | 用途 |
+|------|------|
+| `DEM_PATH=/abs/path/to/global_dem.npy` | 自定义 ETOPO1 级全球 DEM（训练/校验 fallback） |
+| `TECT_JSON=/abs/path/to/PB2002_boundaries.json` | 自定义板块边界 JSON（训练 tectonics.py fallback） |
+| `FORCE_CPU=1` | 即使有 MPS/CUDA 也强制用 CPU（调试精度对比） |
+| `PYTORCH_ENABLE_MPS_FALLBACK=1` | **Apple Silicon 必备**：部分算子 MPS 未实现时自动回退 CPU |

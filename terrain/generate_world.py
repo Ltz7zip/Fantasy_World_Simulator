@@ -37,6 +37,26 @@ from plate_sim import run_plate_sim
 
 
 def fbm1d(n, sigma, rng):
+    """在频率域构造一维粉红噪声（fBm 近似）。
+
+    实现：对标准正态白噪声做 rFFT → 乘以高斯带宽 ``exp(−(f·σ)²)``
+    （``σ`` 越大越平滑，越低通）→ 逆 rFFT 回到空间域。
+    用于海冰边缘纬度、雪线纬度波动等 **需要长程连续** 的一维曲线。
+
+    Parameters
+    ----------
+    n : int
+        输出长度（像素数 / 纬度行数等）。
+    sigma : float
+        高斯带宽的尺度因子。常见取值 80~640，越大谱越窄、越平滑。
+    rng : numpy.random.Generator or RandomState
+        任意可调用 ``.randn(n)`` 的随机数生成器。
+
+    Returns
+    -------
+    ndarray of shape (n,), dtype float64
+        零均值的一维 fBm 近似值（幅度量级约为 1σ 单位白噪声）。
+    """
     x = rng.randn(n)
     X = np.fft.rfft(x)
     X *= np.exp(-(np.fft.rfftfreq(n) * sigma) ** 2)
@@ -44,6 +64,26 @@ def fbm1d(n, sigma, rng):
 
 
 def despeckle(v01, min_area=48):
+    """去斑：清除面积过小的陆地块与海洋孔洞（联通分量域）。
+
+    原理：
+        1. 对陆地（v ≥ 0.5）做连通域标注，若某连通域像素数 < ``min_area``，
+           则以 9×9 最小值滤波覆盖（把小岛腐蚀成海洋，不产生洞）。
+        2. 再对海洋（v < 0.5）做同等处理，用 9×9 最大值滤波回填（清除
+           陆地内部的小淡水湖 / 盐沼噪点）。
+
+    Parameters
+    ----------
+    v01 : ndarray (S, S), float32, 值域 [0, 1]
+        归一化高程（v01 = m2v(dem_m)）。
+    min_area : int
+        最小联通域面积（像素）。v6.6 默认 48 → 去斑后为 32（保住岛弧小岛）。
+
+    Returns
+    -------
+    ndarray (S, S), float32
+        去斑后的归一化高程。
+    """
     v = v01.copy()
     land = v >= 0.5
     lab, n = ndi_label(land)
@@ -61,7 +101,43 @@ def despeckle(v01, min_area=48):
 
 def global_envelope_match(v01, bm, bstd, bmin, bmax, glac, block=8,
                           blend=0.60, seed=0, cap_m=8200.0):
-    """全局一次 CDF 匹配 + 逐像素块包络裁剪 + 行星峰值截断 + 冰盖低blend保纹理"""
+    """全局一次 CDF 匹配 + 逐像素块包络裁剪 + 行星峰值截断 + 冰盖低 blend 保纹理。
+
+    GAN 生成的原始 ``[0, 1]`` 归一化高程会有整体分布失真（峰不够高、洋不够深）
+    的问题。本函数把它按分位对齐到一个更接近地球的"参考分布"，同时在每个粗块
+    上用 ``bmin/bmax`` 做软包络约束（避免 GAN 在单块上产生跳变极端值），并在
+    冰川覆盖区降低 blend 比例（避免把冰盖内部纹理磨平）。
+
+    算法简述：
+        1. 以像素为单位从 ``bm/bstd/bmin/bmax`` 采样一个"合理值"：
+           ``s = Normal(bm, bstd)`` → 夹到 ``[bmin, bmax]``（每像素独立样本）。
+        2. 把 ``s`` 与 ``v01`` 同时按排序（ranked）配对 → 得到基于 CDF 的
+           ``matched``（单调，保留 v01 空间结构）。
+        3. 块包络（上采样后的 bmin/bmax）软夹一次 + 行星峰值 ``cap_m`` 硬钳。
+        4. 与原始 v01 按 blend 线性混合（冰盖区 blend 下调 0.30）。
+
+    Parameters
+    ----------
+    v01 : ndarray (H, W), float32, [0, 1]
+        GAN 原始输出。
+    bm, bstd, bmin, bmax : ndarray (W//block, H//block), float32
+        粗块均值 / 标准差 / 最小值 / 最大值（来自 ``world_to_channels``）。
+    glac : ndarray (同粗块尺寸)
+        每块冰川覆盖率（0~1），用于降低高冰盖区的 blend。
+    block : int
+        块大小（训练时 cfg.block；v5=8）。与粗块尺寸匹配的上采样基。
+    blend : float
+        线性混合权重（1 = 完全匹配替换，0 = 完全保留 GAN 输出）。v6.6 默认 0.60。
+    seed : int
+        用于生成"合理值"参考样本的随机种子。
+    cap_m : float
+        行星绝对峰值（米），v6.6 取 8200m（先 m2v 再钳制）。
+
+    Returns
+    -------
+    ndarray (H, W), float32, [0, 1]
+        匹配 + 夹取 + 混合后的归一化高程。
+    """
     rng = np.random.default_rng(seed)
     h, w = v01.shape
     n = h * w
@@ -81,8 +157,36 @@ def global_envelope_match(v01, bm, bstd, bmin, bmax, glac, block=8,
 
 
 def render_world(v01, lats, landS, cmap, rng):
-    """气候因果链渲染: 温度/降水 → 生物群系 + 山体阴影 + 可见河流/湖泊
-    + 温度雪线(纬度+海拔双因素连续过渡, 无硬截断) + 海冰"""
+    """气候因果链终态渲染：温度 / 降水 → Whittaker 生物群系色 → 叠加地形阴影 / 河湖 / 雪线 / 海冰。
+
+    渲染管线（顺序执行，后续元素覆盖前面）：
+        1. 温度场 T + 降水场 P + 洋流/季风 dT/dP 异常 → Whittaker 9 类生物群系
+           → ``BIOME_COLORS[bi]`` 陆地配色（海洋直接用地形色卡）。
+        2. NW 方向光照山体阴影（陆地渐变明暗 × 海拔渐亮）→ 增强地形层次感。
+        3. 湖泊：形态学填洼面与实际地形差 > 0.012v 的陆地区域。
+        4. 河流：填洼后 D8 流累积 > 99.5 分位（干流 5× 分位加宽加深）。
+        5. 雪线：纬度雪线（干旱抬升 +800m）∪ 温度雪线（T ≤ −12°C）× 山脊纹理骨架。
+        6. 海冰：纬度 64.5°±2.5° 边界 × 浮冰 fBm 噪声 × 极地硬保障。
+
+    Parameters
+    ----------
+    v01 : ndarray (S, S), float32, [0, 1]
+        最终归一化高程（v6.6 全部后处理后的结果）。
+    lats : ndarray (S,)
+        行对应的纬度（像素中心对齐，递增）。
+    landS : ndarray (S, S) bool
+        陆地掩膜（提前缓存，避免多次计算）。
+    cmap : matplotlib Colormap
+        海洋部分使用的地形色卡（通常是 ``make_terrain_cmap()`` 的返回值）。
+    rng : numpy.random.RandomState
+        随机数生成器（供 fBm / 浮冰 / 降水场采样）。
+
+    Returns
+    -------
+    ndarray (S, S, 3), float32, [0, 1]
+        RGB 图像。直接 ``plt.imsave`` 或 ``PIL.Image.fromarray((rgb*255).astype(uint8))``
+        均可得到与 ``world_map.png`` 一致的 PNG 图像。
+    """
     S = v01.shape[0]
     land = v01 >= 0.5
     elev_m = v2m(v01)
@@ -132,6 +236,35 @@ def render_world(v01, lats, landS, cmap, rng):
 
 
 def world_to_channels(elev_m, lats, tect_T, block=8, seed=1):
+    """把米制高程 + 四通道构造场编码为 12 通道条件（条件 GAN 输入的粗底图）。
+
+    通道布局（索引 → 含义），与 ``terrain_engine.py`` 训练管线严格一致：
+        [0] 块均值 bm        [1] 块标准差 bstd
+        [2] 块最小值 bmin      [3] 块最大值 bmax
+        [4] 海陆比例 lf       [5] 河网 (log 归一化，仅陆地可见)
+        [6] 冰川覆盖率         [7] 绝对纬度/90°
+        [8] 俯冲/碰撞构造场    [9] 离散（裂谷/洋脊）构造场
+        [10] 转换断层构造场   [11] 其余构造场（第 0 通道）
+
+    Parameters
+    ----------
+    elev_m : ndarray (H, H), float32
+        米制高程骨架（像素级细化阶段之后、GAN 之前的结果）。
+    lats : ndarray (H,)
+        像素中心对齐纬度。
+    tect_T : ndarray (4, T, T)
+        板块模拟器输出的四通道构造场（将被上采样到 H 后再块化）。
+    block : int
+        块大小（v5 训练为 8）；输出通道空间尺寸 = H/block。
+    seed : int
+        D8 流累积等的随机种子。
+
+    Returns
+    -------
+    tuple (ch, bm, bstd, bmin, bmax, lf)
+        - ch: ndarray (12, H//block, H//block), float32 — 12 通道条件张量
+        - bm/bstd/bmin/bmax/lf: ndarray (B, B) — 粗块统计（供后处理复用）。
+    """
     rng = np.random.RandomState(seed)
     v01 = m2v(elev_m)
     H = v01.shape[0]
@@ -159,6 +292,54 @@ def world_to_channels(elev_m, lats, tect_T, block=8, seed=1):
 @torch.no_grad()
 def generate_world(seed=0, size_px=2048, ckpt_path=None,
                    tect_res=512, out_png=None, out_npy=None):
+    """**项目主入口**：生成一整个幻想世界的米制 DEM + 气候终态渲染 PNG。
+
+    四大阶段（1/4 → 4/4）：
+        1. 板块演化模拟（``plate_sim.run_plate_sim``，450 Myr，有缓存）：
+           返回粗分辨率构造骨架 ``elev_T, tect_T, crust_T, margin_T, belt_T, rift_T``。
+           命中缓存（``cache/plate_sim_v3_T{tect_res}_seed{seed}.npz``）时可从
+           2~4 分钟缩到 < 10s。
+        2. 像素级骨架细化：周期 fBm 域扭曲（消 Voronoi 直线感）+ 上采样到
+           ``size_px`` + 海岸分形级联（D≈1.3）+ 山脉/盆地 + **v6.6 七大
+           地理维度修复层**（陆架剖面、板内造山、陆地直方图、岛弧链、热点岛链…）。
+           此阶段结果保存为 ``world_skeleton.png`` 便于检查大陆走向。
+        3. 逐瓦片 12 通道条件 GAN：把粗 DEM 编码为 12 通道（块统计 / 海陆 /
+           河网 / 冰川 / 纬度 / 4 构造场），UNet 256² 瓦片推理 + 余弦羽化拼贴
+           回原始分辨率，同时做低频一致性拉回与深海硬钳制（防 GAN 幻浅滩）。
+        4. 全局后处理：``global_envelope_match`` CDF 包络匹配 → 去斑 → 粒子
+           水力侵蚀 → 干流河谷雕刻 → 海岸锐化 → 峡湾雕刻 → 陆架终检 →
+           填洼 D8 河网 → **陆地直方图终检**（绝对最后一步）→ 裂谷重新下切 →
+           克拉通盆地 → 台地半岛 → 珊瑚礁 → **深洋直方图终检 M6**。
+           最终 ``world_dem.npy`` 同时满足陆地、海洋两个维度的直方图分位。
+
+    Parameters
+    ----------
+    seed : int
+        世界种子，决定一切随机性（板块速度场 / fBm / GAN 噪声 / 气候采样）。
+        推荐非负整数；任意整数均可。
+    size_px : {2048, 4096}
+        目标 DEM 单边像素数。4096 ≈ 4× 耗时 + 16× 显存，需要 ≥32GB RAM。
+    ckpt_path : str or None
+        UNet 权重路径。空时回退为 ``terrain/checkpoints/best_terrain_gan_v5.pth``。
+        若权重的 ``cfg.in_ch != 12`` 会抛 ``AssertionError``（FAQ Q2）。
+    tect_res : int
+        板块模拟分辨率（默认 512，与缓存匹配；请与 TECHNICAL §2 一致修改）。
+    out_png / out_npy : str or None
+        渲染图 / DEM 输出路径。空时分别写为 ``terrain/output/world_map.png``
+        与 ``terrain/output/world_dem.npy``。
+
+    Returns
+    -------
+    ndarray of float32, shape ``(size_px, size_px)``
+        最终米制高程（正值陆地 / 负值海洋），范围经钳制到 [−10500, +8900] m。
+        同时磁盘已写出 ``world_dem.npy``、``world_map.png``、``world_skeleton.png``。
+
+    Notes
+    -----
+    本函数全程使用确定性随机数（numpy RandomState + torch.manual_seed 由权重承载），
+    同一 seed 多次运行**严格 bitwise 一致**；只有删除板块缓存或修改源代码时才会
+    改变地形。
+    """
     _dir = os.path.dirname(os.path.abspath(__file__))
     os.makedirs(os.path.join(_dir, "cache"), exist_ok=True)
     os.makedirs(os.path.join(_dir, "output"), exist_ok=True)

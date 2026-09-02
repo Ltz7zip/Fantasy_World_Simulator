@@ -41,13 +41,24 @@ M_KNOTS = np.array([-11000, -6000, -4000, -2500, -1000, -200, 0,
                     100, 400, 1000, 2000, 3500, 5000, 8849], np.float64)
 V_KNOTS = np.array([0.00, 0.08, 0.22, 0.34, 0.42, 0.47, 0.50,
                     0.53, 0.60, 0.70, 0.82, 0.92, 0.97, 1.00], np.float64)
+# 说明：M_KNOTS 与 V_KNOTS 是全局「米制高程 ↔ 归一化 v∈[0,1]」单调分段线性映射。
+#   - 深海端压缩（−11000 → 0.08）：−6000m 以内 8% 的值空间就够装，留 42% 给陆壳。
+#   - v=0.50 恰好对应 elev=0m（海平面），陆地判定 v01>=0.5 与 elev>=0m 严格一致。
+#   - 陆端压缩集中平原 / 丘陵 / 山地：2000m ≈ 0.82、5000m ≈ 0.97、8849m=1.00。
 
 
 def m2v(m):
+    """米制高程 → 归一化 [0, 1]（按 M_KNOTS/V_KNOTS 分段线性插值）。
+
+    例：m=0m → 0.50；m=+2000m → ~0.82；m=−6000m → ~0.08。
+    常用于把 DEM 转为 GAN 输入/输出的 v 域（激活函数尾端饱和）。"""
     return np.interp(m, M_KNOTS, V_KNOTS).astype(np.float32)
 
 
 def v2m(v):
+    """归一化 v∈[0,1] → 米制高程（``m2v`` 的严格逆映射）。
+
+    取值限制：v<0 → −11000m，v>1 → +8849m（外推由 np.interp 常数延伸）。"""
     return np.interp(v, V_KNOTS, M_KNOTS)
 
 
@@ -64,6 +75,30 @@ def snowline_m(lat):
 
 # ---- A1: block_reduce 支持 mean/std/min/max ----
 def block_reduce(a, block, mode):
+    """``skimage.measure.block_reduce`` 的轻量重实现，避免额外依赖。
+
+    把二维数组按 ``block × block`` 非重叠切块，对每块按 ``mode`` 进行归约：
+        - ``"mean"``: 算术平均
+        - ``"std"`` : 标准差（总体 / ddof=0）
+        - ``"min"`` : 最小值
+        - ``"max"`` : 最大值
+
+    右下方不足一整块的行列会被**丢弃**（调用方保证 S 是 block 的整数倍即可）。
+
+    Parameters
+    ----------
+    a : ndarray (H, W)
+        二维输入数组。
+    block : int
+        单边块大小（正方形块）。
+    mode : {"mean", "std", "min", "max"}
+        归约方式。
+
+    Returns
+    -------
+    ndarray (H//block, W//block)
+        归约结果，dtype 继承自原 dtype（std 会升级到 float）。
+    """
     H, W = a.shape
     b = a[:H // block * block, :W // block * block].reshape(
         H // block, block, W // block, block)
@@ -84,6 +119,29 @@ _D8 = [(-1, -1, 1.41421356), (-1, 0, 1.0), (-1, 1, 1.41421356), (0, -1, 1.0),
 
 
 def d8_flow_accumulation(elev, rng):
+    """D8（八方向）流向算法计算流量累积：
+
+    1. **高程抖动**：给 DEM 加 U(0, 1e−4) 微扰动，**避免完全等高水平面形成零梯度循环**
+       （实际流域里这种平坦区非常罕见，数值上必须解决）。
+    2. **最优流向**：对每个像素枚举 8 邻域（4 正交 + 4 对角，对角线距离加权
+       ``√2``），选择坡度最陡的下游像素作为 ``recv``，记录为一维索引
+       ``y*w + x``（无更低下游 = −1，即出口 / 内流区）。
+    3. **拓扑序累积**：按高程降序对像素排序（高→低），依次把自身流量加到 ``recv``。
+       保证当处理 i 时，比 i 高的所有上游都已把流量加到 i 上 → O(N) 一次完成。
+
+    Parameters
+    ----------
+    elev : ndarray (H, W)
+        v 域或米域高程均可（结果只依赖相对高低，非绝对值）。
+    rng : numpy.random.RandomState
+        用于抖动的随机数生成器；同一 ``rng`` 产生的抖动一致，保证可重现。
+
+    Returns
+    -------
+    ndarray (H, W), float32
+        流量累积值（单位：像素数），``acc[i,j]``=以该像素为出口的上游汇水总像素数。
+        常见量级：干流 > 5×99.5 分位，支流 ≈ 99~99.9 分位。
+    """
     h, w = elev.shape
     e = elev.astype(np.float32) + rng.uniform(0, 1e-4, (h, w)).astype(np.float32)
     best_s = np.full((h, w), 1e-9, np.float32)
@@ -589,6 +647,31 @@ class SelfAttention(nn.Module):
 
 
 class UNet(nn.Module):
+    """条件 GAN 的生成器 G：12 通道条件 → 单通道归一化高程（sigmoid 输出 ∈ [0,1]）。
+
+    架构 (v5, 4 次下采样 + 4 次上采样，与 pix2pix 的 UNet 类似但更轻量)：
+        - **编码器 stem + 4 层**：MaxPool(↓2) + Conv(2×ch) + ReLU + ResBlock；
+          每一层输出 h1~h4 作为跳跃连接源（保留低频位置信息）。
+        - **瓶颈层 bot**：ResBlock(8×b) + SelfAttention（允许长程结构一致性，
+          用来避免 GAN 在山脉走向 / 海岸曲率上出现"左右不一致"的斑状伪影）。
+        - **解码器 4 层**：Resize-Conv ``bilinear 上采样 → Conv``（代替 ConvTranspose，
+          抑制棋盘格伪影），与对应层编码器 feature 在通道维度 concat，再 ResBlock。
+        - **输出 head**：1×1 Conv + Sigmoid → 单通道 v∈[0,1]。
+
+    推理用的权重（~44MB）存放在 ``checkpoints/best_terrain_gan_v5.pth``，其中
+    ``cfg.in_ch=12, base=32``。训练时保存为 ``{"gen_ema", "cfg", "ch_stats_mean",
+    "ch_stats_std", ...}`` 字典，其中 ``gen_ema`` 是指数滑动平均版本（视觉质量
+    更稳定，不使用单步模型）。
+
+    Parameters
+    ----------
+    in_ch : int
+        输入条件通道数。v5 训练为 12；v6.x 以前模型可能为 8（AssertionError 提示重训）。
+    base : int
+        stem 基础通道数。默认 32 足以在 ~2GB 显存上跑 256² 训练 / 推理。
+    dropout : float
+        ResBlock 内 Dropout2d 比例。默认 0.05，防止 GAN 过拟合小细节导致 PSD 低频化。
+    """
     def __init__(self, in_ch=8, base=32, dropout=0.05):
         super().__init__()
         b = base
@@ -719,8 +802,35 @@ def sharpen_coastline(elev, band=0.025, expand=0.06):
 
 
 def lowfreq_consistency(v01, bm, block=8, iters=3):
-    """引导式低频融合: 迭代把输出块均值精确拉回粗底图。
-    深海变浅/平原起丘等'云状漂移'由粗图(第一级构造骨架)锁死。"""
+    """引导式低频一致性校正：迭代把 GAN 输出的块均值精确拉回粗底图。
+
+    GAN 在逐瓦片推理时容易出现"云状漂移"（深海整体变浅 / 平原无端起丘），
+    而粗底图 ``bm`` 来自构造骨架，其低频是 **权威** 的。本函数执行以下修复循环：
+
+        for each iter:
+          1. 对输出 ``out`` 做 block_reduce(mean) → 得到当前块均值 bm_out
+          2. ``resid = bm - bm_out``（粗图尺寸的残差）
+          3. 对残差上采样 + 高斯平滑（σ=block/3，避免在块边界出现阶跃）
+          4. ``out += smoothed resid``（向 bm 方向回拉一块）
+
+    3 次迭代后块均值 RMSE 通常 < 0.001，且高频纹理被高斯核保留。
+
+    Parameters
+    ----------
+    v01 : ndarray (S, S), float32, [0, 1]
+        GAN 输出的归一化高程。
+    bm : ndarray (B, B)
+        粗块目标均值（来自 ``world_to_channels`` 的同一张骨架图）。
+    block : int
+        块尺寸，必须与 ``bm`` 生成时的 block 一致（v5=8）。
+    iters : int
+        迭代次数。默认 3 足够稳定；更多 ≈ 更死锁骨架但纹理更木。
+
+    Returns
+    -------
+    ndarray (S, S), float32, [0, 1]
+        低频对齐后的输出。
+    """
     out = np.clip(v01, 0, 1).astype(np.float32)
     for _ in range(iters):
         resid = bm - block_reduce(out, block, "mean")
@@ -859,8 +969,33 @@ def ocean_current_effects(elev_m, lats, warmT=3.5, warmP=250., warmD=400.,
 
 
 def temperature_field(lats, elev_m, dT=None):
-    """气温 (°C): T = 27 − 0.42·|lat| − 6.5·(elev/1000) − 极地放大项
-    极地放大(55°~90°平方增强) → 海平面温度在 ~80° 降至 -15°C, 极冠成雪"""
+    """计算近地面年均气温场（℃，逐像素）。
+
+    公式：
+        T = 27 − 0.42·|lat| − 6.5·max(elev,0)/1000 − polar(lat)
+
+    其中各项物理依据：
+        - **27°基准**：赤道海平面年均温（接近地球实测 26~28℃）。
+        - **0.42·|lat|**：每纬度递减（比纯太阳角算出来的略大，吸收了海陆差异平均）。
+        - **6.5·h/1000**：干绝热递减率，每升高 1000m 降 6.5℃。
+        - **polar = clip((|lat|−55)/35, 0, 1)² × 22**：极地放大项——80° 海平面
+          约下降 17℃ → 80°海平面 T≈−15℃，自动形成极冠积雪。
+    最后叠加洋流/季风 ``dT``（海湾流+3.5℃等，为 0 或陆地外为 0）。
+
+    Parameters
+    ----------
+    lats : ndarray (S,)
+        纬度数组。
+    elev_m : ndarray (S, W)
+        米制高程（海洋负值参与海洋温度时只取 max(elev, 0)=0 即可——海面温度 = 海平面温度）。
+    dT : ndarray (S, W) or None
+        洋流/季风异常温度。若给定则直接相加。
+
+    Returns
+    -------
+    ndarray (S, W), float64
+        逐像素年均气温（℃）。
+    """
     a = np.abs(np.asarray(lats, np.float64))[:, None]
     polar = np.clip((a - 55.0) / 35.0, 0.0, 1.0) ** 2 * 22.0
     T = 27.0 - 0.42 * a - 6.5 * np.maximum(elev_m, 0.0) / 1000.0 - polar
