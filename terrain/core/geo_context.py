@@ -693,7 +693,14 @@ def get_ctx(seed: int = 0, size: int = 2048) -> WorldGeoContext:
 # __main__ 自测
 # ===========================================================================
 
-if __name__ == "__main__":
+def main():
+    """``geo_context.py`` 命令行入口 —— 单例加载 + 自测。
+
+    解析 ``--seed / --size`` 实例化 :class:`WorldGeoContext`，输出
+    内存 / 陆地表面积指标，并执行单点查询、多边形区域统计、
+    网格<->经纬度往返一致性自检。薄封装 ``terrain/geo_context.py``
+    以脚本方式运行时，经由此入口进入。
+    """
     # 运行：python terrain/geo_context.py  --seed 1 --size 2048
     import argparse
     ap = argparse.ArgumentParser()
@@ -737,9 +744,13 @@ if __name__ == "__main__":
             print(f"  {k:20s} = {v}")
 
     # 网格往返一致性测试
-    r0, c0 = S0 = ctx.size // 3, ctx.size // 4
+    r0, c0 = ctx.size // 3, ctx.size // 4
     lat0, lon0 = ctx.idx_to_latlon(r0, c0)
     r1, c1 = ctx.latlon_to_idx(lat0, lon0)
     print(f"\n[自测] 网格<->经纬度往返: ({r0},{c0})→"
           f"({lat0:.3f},{lon0:.3f})→({r1},{c1})  "
-          f"一致={'YES' if (r0,c0)==(r1,c1) else 'NO'}")
+          f"一致={'YES' if (r0, c0) == (r1, c1) else 'NO'}")
+
+
+if __name__ == "__main__":
+    main()

@@ -22,9 +22,11 @@ import torch
 import matplotlib.pyplot as plt
 from scipy.ndimage import (gaussian_filter, distance_transform_edt,
                            zoom as ndi_zoom, label as ndi_label,
-                           minimum_filter, maximum_filter, binary_dilation)
+                           minimum_filter, maximum_filter, binary_dilation,
+                           median_filter)
 from terrain_engine import (device, m2v, v2m, block_reduce, d8_flow_accumulation,
                             snowline_m, value_fbm, ridged_fbm, sharpen_coastline,
+                            directional_band_noise,
                             lowfreq_consistency, suppress_hallucinated_land,
                             polar_ice_mask, make_terrain_cmap, UNet,
                             temperature_field, precipitation_field, whittaker_biome,
@@ -33,9 +35,12 @@ from terrain_engine import (device, m2v, v2m, block_reduce, d8_flow_accumulation
                             land_hist_match, ocean_margin_fix, add_island_arcs,
                             add_hotspot_chains, add_intraplate_orogen,
                             carve_trunk_rivers, land_hist_final,
+                            climate_flow_accumulation, paint_rivers_rgb,
                             carve_fjords, add_shelf_peninsulas,
                             add_coral_reefs, ocean_current_effects,
-                            add_craton_basins, ocean_hist_final)
+                            add_craton_basins, ocean_hist_final,
+                            continentality_index, smooth_biome_labels,
+                            enhance_ocean_floor, classify_landforms)
 from plate_sim import run_plate_sim
 
 
@@ -159,7 +164,7 @@ def global_envelope_match(v01, bm, bstd, bmin, bmax, glac, block=8,
     return np.clip(bl * matched + (1 - bl) * v01, 0, 1).astype(np.float32)
 
 
-def render_world(v01, lats, landS, cmap, rng):
+def render_world(v01, lats, landS, cmap, rng, tect_ctx=None):
     """气候因果链终态渲染：温度 / 降水 → Whittaker 生物群系色 → 叠加地形阴影 / 河湖 / 雪线 / 海冰。
 
     渲染管线（顺序执行，后续元素覆盖前面）：
@@ -170,6 +175,7 @@ def render_world(v01, lats, landS, cmap, rng):
         4. 河流：填洼后 D8 流累积 > 99.5 分位（干流 5× 分位加宽加深）。
         5. 雪线：纬度雪线（干旱抬升 +800m）∪ 温度雪线（T ≤ −12°C）× 山脊纹理骨架。
         6. 海冰：纬度 64.5°±2.5° 边界 × 浮冰 fBm 噪声 × 极地硬保障。
+        7. v7.8 地貌纹理：盆地/山地高度+成因/高原切割+侵蚀/丘陵高低的差异化纹理.
 
     Parameters
     ----------
@@ -183,6 +189,8 @@ def render_world(v01, lats, landS, cmap, rng):
         海洋部分使用的地形色卡（通常是 ``make_terrain_cmap()`` 的返回值）。
     rng : numpy.random.RandomState
         随机数生成器（供 fBm / 浮冰 / 降水场采样）。
+    tect_ctx : dict, optional
+        构造场上下文 (envS/beltS/cf/tect_T/margin_up/riftS). None 时地貌子类退化为旧 v7.7.
 
     Returns
     -------
@@ -193,33 +201,199 @@ def render_world(v01, lats, landS, cmap, rng):
     S = v01.shape[0]
     land = v01 >= 0.5
     elev_m = v2m(v01)
-    dT, dP = ocean_current_effects(elev_m, lats)     # M4 洋流/季风气候效应
-    T = temperature_field(lats, elev_m, dT)
-    P = precipitation_field(lats, elev_m, rng, dP)
-    bi = whittaker_biome(T, P)
+    ci = continentality_index(elev_m, lats)              # v7.1 大陆度指数 (一次计算, 多函数复用)
+    dT, dP = ocean_current_effects(elev_m, lats)         # M4 洋流/季风气候效应
+    T = temperature_field(lats, elev_m, dT, ci=ci)       # v7.1: 大陆度温度修正 + 极地缓和
+    P = precipitation_field(lats, elev_m, rng, dP, ci=ci)# v7.1: 大陆度降水 + 副高 + 屏障 + 长波扰动
+    # ---- v7.7: T 场高斯平滑 (σ=2.5) + P 预平滑 (σ=1.5), 消除等温/等雨线像素级抖动 ----
+    #   P 场在 precipitation_field 末尾已做 [2.2,1.2] 高斯, 再加 σ=1.5 总平滑≈3.0;
+    #   T 场 σ=2.5≈50km 对应真实 ecotone 宽度下限, 过大会模糊气候带边界.
+    T_s = gaussian_filter(T.astype(np.float32), 2.5)
+    P_s = gaussian_filter(P.astype(np.float32), 1.5)
+    bi = whittaker_biome(T_s, P_s, lats=lats, ci=ci)   # v7.1: 苔原/泰加林/草原门限大陆度自适应
+    # ---- v7.7: 群系边界平滑 + 碎片清理 (7×7 中值 + <50px 碎片清理 + 3轮迭代) ----
+    #   7px≈137km 对应 ecotone 尺度; 50px≈980km²(塞浦路斯级)以下飞地无气候意义;
+    #   3轮收敛消除中值产生的 1-2px 新碎片. 目标: 温带落叶林<300块, 热带季节林<250块.
+    bi = smooth_biome_labels(bi, land, median_size=7, min_patch_px=50, iters=3)
     # 山体阴影 (NW 光照, 仅陆地) → 地形层次感
     g = gaussian_filter(v01, 1.5)
     gy, gx = np.gradient(g)
     hs = np.clip(0.88 - 22.0 * (gx + gy), 0.60, 1.15)
     shade = (0.78 + 0.55 * np.clip((v01 - 0.5) / 0.5, 0, 1)) * (0.72 + 0.28 * hs)
     land_rgb = BIOME_COLORS[bi] * shade[..., None]
+    # ---- v7.9: 群系边界颜色软过渡 (修复整数索引导致的方块状硬切换) ----
+    #   整数标签索引 BIOME_COLORS[bi] 让相邻群系颜色像素级硬切换, 配合中值滤波的
+    #   网格对齐效应 → 斜边界呈"阶梯/方块"状. 这里在渲染端做边界带颜色软混合:
+    #     1. 找群系边界像素 = 陆地内 4 邻域存在不同群系标签的像素
+    #     2. 距离场 d = 陆地像素到最近群系边界的欧氏距离 (mask=land 限制陆地)
+    #     3. 边界带 d≤band 内, 用 σ=band/2 各向同性高斯混合 land_rgb → 颜色渐变
+    #        群系核心 (d>band) 保持纯色, 边界做加权过渡 → 对应真实生态交错带 ecotone
+    #   物理: 真实群系过渡带宽 30-100km, 2048px 下 band=3≈60km 对应中值尺度.
+    if land.any():
+        bi_p = np.pad(bi, 1, mode='edge')
+        bnd = land & (
+            (bi_p[1:-1, 1:-1] != bi_p[:-2, 1:-1]) |   # 上邻不同
+            (bi_p[1:-1, 1:-1] != bi_p[2:, 1:-1]) |    # 下邻不同
+            (bi_p[1:-1, 1:-1] != bi_p[1:-1, :-2]) |   # 左邻不同
+            (bi_p[1:-1, 1:-1] != bi_p[1:-1, 2:]))     # 右邻不同
+        if bnd.any():
+            # 全图距离场 → 仅取陆地部分 (海洋 d 置 0, 后续被 rgb.where 覆盖)
+            d = np.where(land, distance_transform_edt(~bnd), 0.0).astype(np.float32)
+            band = 3.0
+            w = np.clip(1.0 - d / band, 0.0, 1.0).astype(np.float32)  # 边界=1, 核心=0
+            if w.any():
+                # 各向同性高斯混合 (σ=band/2, 圆形核 → 不会引入方向性方块)
+                land_rgb_b = np.empty_like(land_rgb)
+                for c in range(land_rgb.shape[2]):
+                    land_rgb_b[..., c] = gaussian_filter(land_rgb[..., c],
+                                                         sigma=band * 0.5)
+                land_rgb = ((1.0 - w[..., None]) * land_rgb
+                            + w[..., None] * land_rgb_b).astype(np.float32)
     rgb = cmap(np.clip(v01, 0, 1))[..., :3]
+    # ---- v7.7: 海底分层着色 (大陆边缘/大洋盆地/大洋中脊 三大单元 + 次级纹理) ----
+    # ---- v8.0: 软深度权重替代硬阈值 mask, 消除 -2000/-5500m 等深线颜色阶跃
+    #           (旧版在岛屿周边深度跨阈值时产生方块色环; 现 200m 过渡带平滑混合) ----
+    sea = ~land
+    if sea.any():
+        depth = elev_m
+        # 软深度权重 (200m tanh 过渡): w_margin 在 0~-2000m=1, w_basin 在 -2000~-5500m=1, w_abyss 在 <-5500m=1
+        _dt = 200.0  # 颜色过渡带宽 (米)
+        w_margin = 0.5 * (1.0 - np.tanh((depth + 2000.0) / _dt)) * sea
+        w_basin = 0.5 * (np.tanh((depth + 2000.0) / _dt)
+                         - np.tanh((depth + 5500.0) / _dt)) * sea
+        w_abyss = 0.5 * (1.0 + np.tanh((depth + 5500.0) / _dt)) * sea
+        # 各区目标颜色 (rgb 是 cmap 原始色)
+        margin_color = rgb * 0.6 + np.array([0.18, 0.42, 0.55], np.float32) * 0.4
+        basin_color = rgb * 0.5 + np.array([0.05, 0.18, 0.38], np.float32) * 0.5
+        abyss_color = rgb * 0.4 + np.array([0.02, 0.08, 0.20], np.float32) * 0.6
+        # 软混合三区颜色 (权重和=1 in sea, 0 in land)
+        sea_rgb = (w_margin[..., None] * margin_color
+                   + w_basin[..., None] * basin_color
+                   + w_abyss[..., None] * abyss_color).astype(np.float32)
+        # 陆地保持原色 (rgb), 仅海洋部分替换
+        rgb = np.where(sea[..., None], sea_rgb, rgb).astype(np.float32)
+        # 洋中脊相对隆起 (深海中相对浅的条带) 提亮 — 保留旧版硬阈值 (局部细节, 不影响块状)
+        ridge_relieve = sea & (depth > -6000.0) & (depth < -4000.0)
+        # 用局部起伏找脊: 比邻域均值浅 → 提亮
+        loc_mean = gaussian_filter(depth.astype(np.float32), 8.0)
+        ridge_band = ridge_relieve & (depth > loc_mean + 150.0)
+        sea_rgb2 = rgb.copy()
+        sea_rgb2[ridge_band] = (sea_rgb2[ridge_band] * 0.7
+                               + np.array([0.10, 0.22, 0.40], np.float32) * 0.3)
+        rgb = sea_rgb2
+    # ---- v7.8: 陆地地貌纹理 (盆地/山地高度+成因/高原切割+侵蚀/丘陵高低) ----
+    #   先记录地貌掩膜, land_rgb 覆盖后再叠加纹理, 避免被覆盖.
+    tc = tect_ctx or {}
+    lf = classify_landforms(elev_m, lats, land=land,
+                            envS=tc.get('envS'), beltS=tc.get('beltS'),
+                            cf=tc.get('cf'), tect_T=tc.get('tect_T'),
+                            margin_up=tc.get('margin_up'), riftS=tc.get('riftS'))
+    # 粗类掩膜 (位打包: 用 &0x0F 取粗类, 向后兼容)
+    dune_m = ((lf & 0x0F) == 4)
+    plateau_m = ((lf & 0x0F) == 2)
+    mtn_m = ((lf & 0x0F) == 0)
+    basin_m = ((lf & 0x0F) == 6)
+    hill_m = ((lf & 0x0F) == 5)
     rgb = np.where(land[..., None], land_rgb, rgb).astype(np.float32)
+    # 沙丘 (4): 叠加纵向条纹纹理
+    if dune_m.any():
+        stripes = directional_band_noise(S, direction_deg=15.0,
+                                         freq_center=20.0, anisotropy=0.6, rng=rng)
+        stripes = np.clip((stripes + 0.3), 0, 1)
+        rgb[dune_m] = rgb[dune_m] * 0.7 + \
+            np.array([0.76, 0.62, 0.40], np.float32) * stripes[dune_m, None] * 0.3
+    # 高原 (2): 叠加等高线纹理
+    if plateau_m.any():
+        contour = np.sin(elev_m * 0.02) * 0.5 + 0.5
+        rgb[plateau_m] = rgb[plateau_m] * 0.75 + \
+            np.array([0.55, 0.50, 0.42], np.float32) * contour[plateau_m, None] * 0.25
+    # 山地 (0): 叠加岩石纹理 (高频噪声)
+    if mtn_m.any():
+        rock = value_fbm(S, base_freq=40.0, octaves=3, gain=0.5, rng=rng)
+        rock = np.clip(rock + 0.5, 0, 1)
+        rgb[mtn_m] = rgb[mtn_m] * 0.65 + \
+            np.array([0.40, 0.36, 0.32], np.float32) * rock[mtn_m, None] * 0.35
+    # ---- v7.8 新增子类纹理 ----
+    # 盆地 (6): 沉积层理 / 内流盐渍 / 前陆碎屑
+    if basin_m.any():
+        # 沉积盆地: 横向层理 (低频正弦)
+        sed = basin_m & ((lf & 0xF0) == 0x10)
+        if sed.any():
+            layer_1d = np.sin(np.linspace(0, 6 * np.pi, S)) * 0.5 + 0.5
+            layer = np.broadcast_to(layer_1d[:, None], (S, S))
+            rgb[sed] = rgb[sed] * 0.82 + \
+                np.array([0.62, 0.55, 0.40], np.float32) * layer[sed, None] * 0.18
+        # 内流盆地: 盐渍斑 (亮白)
+        endo = basin_m & ((lf & 0xF0) == 0x40)
+        if endo.any():
+            salt = np.clip(value_fbm(S, 30, 3, rng=rng) + 0.4, 0, 1)
+            rgb[endo] = rgb[endo] * 0.55 + \
+                np.array([0.85, 0.80, 0.72], np.float32) * salt[endo, None] * 0.45
+        # 构造-前陆盆地: 山前碎屑扇 (偏暗)
+        foreland = basin_m & ((lf & 0xF0) == 0x30)
+        if foreland.any():
+            rgb[foreland] = rgb[foreland] * 0.78 + \
+                np.array([0.45, 0.38, 0.30], np.float32) * 0.22
+    # 山地高度细分: 高山偏冷 / 低山偏暖
+    if mtn_m.any():
+        high_m = mtn_m & ((lf & 0x30) == 0x00)
+        low_m = mtn_m & ((lf & 0x30) == 0x20)
+        if high_m.any():
+            rgb[high_m] = rgb[high_m] * 0.85 + \
+                np.array([0.50, 0.45, 0.40], np.float32) * 0.15
+        if low_m.any():
+            soil = np.clip(value_fbm(S, 18, 2, rng=rng) + 0.3, 0, 1)
+            rgb[low_m] = rgb[low_m] * 0.7 + \
+                np.array([0.50, 0.42, 0.30], np.float32) * soil[low_m, None] * 0.30
+    # 山地成因: 褶皱平行脊 / 火山玄武岩
+    if mtn_m.any():
+        fold_m = mtn_m & ((lf & 0xC0) == 0x40)
+        if fold_m.any():
+            ridge_1d = np.sin(np.arange(S) * 0.08) * 0.5 + 0.5
+            ridge_pat = np.broadcast_to(ridge_1d[:, None], (S, S))
+            rgb[fold_m] = rgb[fold_m] * 0.75 + \
+                np.array([0.42, 0.36, 0.30], np.float32) * ridge_pat[fold_m, None] * 0.25
+        volc_m = mtn_m & ((lf & 0xC0) == 0xC0)
+        if volc_m.any():
+            rgb[volc_m] = rgb[volc_m] * 0.6 + \
+                np.array([0.25, 0.20, 0.18], np.float32) * 0.4
+    # 高原切割沟壑 / 侵蚀风化
+    if plateau_m.any():
+        dissect = plateau_m & ((lf & 0xF0) == 0x20)
+        if dissect.any():
+            g = gaussian_filter(v01, 1.0); gy2, gx2 = np.gradient(g)
+            gmag = np.hypot(gx2, gy2)
+            rgb[dissect] = rgb[dissect] * 0.7 + \
+                np.array([0.40, 0.34, 0.26], np.float32) * \
+                np.clip(gmag[dissect, None] * 3, 0, 1) * 0.3
+        eros = plateau_m & ((lf & 0xF0) == 0x30)
+        if eros.any():
+            rgb[eros] = rgb[eros] * 0.85 + \
+                np.array([0.55, 0.48, 0.32], np.float32) * 0.15
+    # 丘陵高低差异化
+    if hill_m.any():
+        hi_h = hill_m & ((lf & 0xF0) == 0x10)
+        lo_h = hill_m & ((lf & 0xF0) == 0x20)
+        if hi_h.any():
+            rgb[hi_h] = rgb[hi_h] * 0.8 + \
+                np.array([0.45, 0.40, 0.32], np.float32) * 0.2
+        if lo_h.any():
+            rgb[lo_h] = rgb[lo_h] * 0.85 + \
+                np.array([0.50, 0.55, 0.30], np.float32) * 0.15
     # 湖泊: 填洼面与实际地形之差 → 湖面 (盆地积水)
     filled = fill_depressions(v01)
     lake = land & ((filled - v01) > 0.012)
     rgb[lake] = rgb[lake] * 0.25 + np.array([0.12, 0.30, 0.46], np.float32) * 0.75
-    # 河流: 填洼 D8 流累积 → 可见河道 (宽度随流量)
-    acc = d8_flow_accumulation(filled, rng)
-    aL = acc[land]
-    thr = max(float(np.quantile(aL, 0.995)) if aL.size else 300.0, 250.0)
-    riv = land & (acc > thr)
-    big = land & (acc > 5.0 * thr)
-    rgb[riv] = rgb[riv] * 0.55 + np.array([0.10, 0.26, 0.42], np.float32) * 0.45
-    big_d = binary_dilation(big, iterations=1) & land
-    rgb[big_d] = rgb[big_d] * 0.35 + np.array([0.08, 0.22, 0.38], np.float32) * 0.65
+    # 河流: 填洼气候加权流累积 → 可见河道 (水量=降水权重×融雪门控)
+    # v8.1: 水源按降水权重+融雪门控 (气候加权 acc), 干流宽度直接由水量决定
+    # v8.2: paint_rivers_rgb 做分级染色 — 源头细淡(s小, 窄, 半透浅蓝)
+    #       → 中段适中 → 河口粗深蓝(s大, 宽, 全覆深蓝); 软边消除像素锯齿
+    acc = climate_flow_accumulation(filled, P, T, rng)
+    rgb = paint_rivers_rgb(rgb, acc, land, rng, base_q=0.995)
     # 雪线: 纬度雪线(干旱抬升) ∪ 温度场雪线(年均温≤-12°C 常年积雪, 连续过渡)
-    dry = np.clip(1.0 - P / 700.0, 0, 1)
+    # v7.2: dry 先 σ=2.0 高斯再进入雪线抬升公式, 切断 "P条带 → dry条带 → 雪线条带" 的三级拍频链
+    dry_raw = np.clip(1.0 - P / 700.0, 0, 1)
+    dry = gaussian_filter(dry_raw.astype(np.float32), 2.0)
     sl01 = m2v(snowline_m(lats)[:, None] + 800.0 * dry)
     a_sl = 0.12 + 0.83 * np.clip((v01 - sl01) / 0.06, 0, 1)
     a_t = np.clip((-12.0 - T) / 6.0, 0, 1)
@@ -294,7 +468,9 @@ def world_to_channels(elev_m, lats, tect_T, block=8, seed=1):
 
 @torch.no_grad()
 def generate_world(seed=0, size_px=2048, ckpt_path=None,
-                   tect_res=512, out_png=None, out_npy=None):
+                   tect_res=512, out_png=None, out_npy=None,
+                   enable_supervisor: bool = True,
+                   apply_suggestions: bool = True):
     """**项目主入口**：生成一整个幻想世界的米制 DEM + 气候终态渲染 PNG。
 
     四大阶段（1/4 → 4/4）：
@@ -330,12 +506,20 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
     out_png / out_npy : str or None
         渲染图 / DEM 输出路径。空时分别写为 ``terrain/output/world_map.png``
         与 ``terrain/output/world_dem.npy``。
+    enable_supervisor : bool
+        v8.0 新增：是否在生成末尾调用 ``terrain.supervisor`` 审计五维指标
+        （地形/温度/降水/群系/风带雪盖）并写学习日志。默认 True。
+    apply_suggestions : bool
+        v8.0 新增：是否把低风险反思建议自动写入 ``overrides.json``（默认 True）。
+        群系阈值等高风险项永不自动注入。设 False 则仅打印建议。
 
     Returns
     -------
     ndarray of float32, shape ``(size_px, size_px)``
         最终米制高程（正值陆地 / 负值海洋），范围经钳制到 [−10500, +8900] m。
         同时磁盘已写出 ``world_dem.npy``、``world_map.png``、``world_skeleton.png``。
+        若 ``enable_supervisor=True``，还会写 ``terrain/supervisor/log.jsonl`` 与
+        ``summary.md``，并在终端打印审计简报。
 
     Notes
     -----
@@ -490,11 +674,11 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
             s = np.minimum(s, cap_m).astype(np.float32)
 
             h, w = hb * block, wb * block
+            # v7.2: 移除 L498-501 的 "图像边界瓦片强制 win=1.0" —— canvas/wgt 全局加权合成
+            #      即使图像外无邻居瓦片，ramp 边缘 taper=0.5 也能通过除以单边权重 wgt 正常重建。
+            #      保留汉宁羽化 taper 使得边界瓦片与内部瓦片在 overlap 区的权重和=1.0,
+            #      彻底消除 tile 208px 网格线的竖/横硬接缝.
             win = np.outer(ramp, ramp)
-            if by == 0: win[:ovp, :] = 1.0
-            if bx == 0: win[:, :ovp] = 1.0
-            if by1 == W and hb >= ovb: win[max(0, h - ovp):, :] = 1.0
-            if bx1 == W and wb >= ovb: win[:, max(0, w - ovp):] = 1.0
             y0p, x0p = by * block, bx * block
             canvas[y0p:y0p + h, x0p:x0p + w] += s[:h, :w] * win[:h, :w]
             wgt[y0p:y0p + h, x0p:x0p + w] += win[:h, :w]
@@ -503,6 +687,19 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
                 print(f"      瓦片 {done}/{total} | {time.time() - t0:.0f}s", flush=True)
 
     out = np.clip(canvas / np.maximum(wgt, 1e-8), 0, 1).astype(np.float32)
+    # v7.2: 瓦片接缝二次羽化 —— 在 step*block (208px) 整数倍的行/列上做 3 像素 σ=0.6 的横向/纵向条带平滑
+    #      (仅对 seam 附近 3px 宽 做高斯混合, 不破坏全局高频细节; 经纬度双重)
+    seam_rows = sorted(set([r * step * block for r in range(1, len(rows)) if r * step * block < size_px]))
+    seam_cols = sorted(set([c * step * block for c in range(1, len(rows)) if c * step * block < size_px]))
+    seam_mask = np.zeros_like(out, dtype=bool)
+    for r in seam_rows:
+        seam_mask[max(0, r-2):min(size_px, r+3), :] = True
+    for c in seam_cols:
+        seam_mask[:, max(0, c-2):min(size_px, c+3)] = True
+    if seam_mask.any():
+        out_s = gaussian_filter(out, 0.6)
+        # 仅 seam 区混合 (blend 0.5 平滑 + 0.5 原版)
+        out = np.where(seam_mask, 0.5 * out + 0.5 * out_s, out).astype(np.float32)
     print("[4/4] 全局阶段: CDF匹配 → 低频复核 → 去斑 → 水力侵蚀 → 填洼D8河网...")
     out = global_envelope_match(out, bm, bstd, bmin, bmax, glac, block,
                                 blend=0.60, seed=seed, cap_m=8200.0)
@@ -512,7 +709,17 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
     out = np.clip(out + 0.016 * value_fbm(size_px, 110.0, 2,
                     rng=np.random.RandomState(seed + 3)) * (out >= 0.5),
                   0, 1).astype(np.float32)        # v6.6 高频细节(提PSD)
-    out = carve_trunk_rivers(out, np.random.RandomState(seed + 55))    # v6.6 干流河谷
+    # v8.1: 为 carve_trunk_rivers 计算气候场 (P/T) — 干流走廊按水量加权 + 曲率扰动
+    # 注: render_world 末段还会再算一次 (供雪线/生物群系用); 此处仅用于干流走廊雕刻
+    elev_mid = v2m(out)
+    ci_mid = continentality_index(elev_mid, lats)
+    dT_mid, dP_mid = ocean_current_effects(elev_mid, lats)
+    T_mid = temperature_field(lats, elev_mid, dT_mid, ci=ci_mid)
+    P_mid = precipitation_field(lats, elev_mid, np.random.RandomState(seed + 88),
+                                 dP_mid, ci=ci_mid)
+    out = carve_trunk_rivers(out, np.random.RandomState(seed + 55),
+                             precip=P_mid, temp=T_mid,
+                             warp_amp=3.0, warp_freq=10.0)    # v8.1 气候加权 + 曲率扰动干流河谷
     # v6.6: 窄带海岸锐化(±0.008v≈±160m) → 不再压掉陆架/抬升陆地直方图
     out = sharpen_coastline(out, band=0.008, expand=0.03)
     # M3 峡湾雕刻: 高纬被动边缘 U 形谷 (斯堪的纳维亚型), 锐化后/陆架终检前
@@ -557,17 +764,68 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
         print(f"      M3 台地露头(半岛/大陆岛): {n_pen}px")
     dem_m = add_coral_reefs(dem_m, lats, np.random.RandomState(seed + 88))  # 珊瑚礁
     dem_m = ocean_hist_final(dem_m, lats)      # M6 深洋直方图终检 (最后, 深带校准)
+    # ---- v7.2: 海底 GAN 伪影 (同心等高线波纹 / Tile DC 方块色) 专属平滑
+    #       海陆严格分离 → 只对 dem_m < 0 的海洋像素应用, 陆地/海岸线 100% 保留.
+    # ---- v7.7: 强化 DC 偏移修正 (blockiness_ratio 1.123→目标<1.03) ----
+    # ---- v8.0: 软权重过渡替代 norm_long>0.02 硬阈值, 消除岛屿周边 ~330m DC 阶跃 ----
+    sea = dem_m < 0.0
+    if sea.any():
+        f = dem_m.astype(np.float32)
+        # 1) 两级去噪: σ=1.4 高斯 (跨瓦片边界轻度混合, 保边) + 5×5 中值 (清同心等高线+1-2px抖动)
+        dem_g = gaussian_filter(f, 1.4)
+        dem_mm = median_filter(f, size=5)
+        # 深度分层加权: 浅海(0~-500m) 30% 混合 → 深海(<-4000m) 75% 混合 (深海本应平坦)
+        w = 0.30 + 0.45 * np.clip((-f - 500.0) / 3500.0, 0.0, 1.0)
+        dem_mix = (1.0 - w) * f + w * (0.60 * dem_g + 0.40 * dem_mm)
+        # 2) Tile DC 偏移均衡化: σ=32 覆盖~8瓦片 (旧σ=12仅5瓦片不足), 减78%偏移 (旧60%)
+        #    v8.0: 软权重 w_dc 在 norm_long∈[0.02, 0.40] 内线性过渡 (旧版硬阈值
+        #          在 0.02 处产生 ~329m DC 阶跃, 在岛屿周边形成方块光晕)
+        smooth_long = gaussian_filter(np.where(sea, f, 0.0), 32.0)
+        norm_long = gaussian_filter(sea.astype(np.float32), 32.0)
+        ref_sea = smooth_long / np.maximum(norm_long, 1e-4)
+        w_dc = np.clip((norm_long - 0.02) / 0.38, 0.0, 1.0).astype(np.float32)
+        ref = w_dc * ref_sea + (1.0 - w_dc) * f
+        dem_dc = f - 0.78 * (f - ref)              # 减掉 78% DC 偏移, 留 22% 真实地形
+        # 合并: 50% 去波纹 + 50% 去方块偏移 → 最终海底 (均衡两类修复)
+        sea_final = 0.50 * dem_mix + 0.50 * dem_dc
+        dem_m = np.where(sea, sea_final.astype(dem_m.dtype), dem_m)
+    # ---- v7.7: 海底地貌增强 (深海丘陵/洋中脊/海山链/陆隆收窄) ----
+    dem_m = enhance_ocean_floor(dem_m, lats, envS=envS,
+                                rng=np.random.RandomState(seed + 22))
     out = m2v(dem_m)
 
     np.save(out_npy, dem_m.astype(np.float32))
+    # v7.8: 构造 tect_ctx 供 render_world 地貌子类分类
+    tect_T_full = np.stack([ndi_zoom(tect_T[i], up, order=1)[:size_px, :size_px]
+                            for i in range(4)])
+    tect_ctx = dict(envS=envS, beltS=beltS, cf=cf,
+                    tect_T=tect_T_full, margin_up=margin_up, riftS=riftS)
     plt.imsave(out_png, render_world(out, lats, landS, make_terrain_cmap(),
-                                     np.random.RandomState(seed)))
+                                     np.random.RandomState(seed), tect_ctx=tect_ctx))
     print(f"\n完成: {out_png} + {out_npy} + world_skeleton.png")
     print(f"  陆地 {(dem_m > 0).mean() * 100:.1f}% | 峰 {dem_m.max():.0f}m | 沟 {dem_m.min():.0f}m")
+
+    # ===== v8.0: 地形监督模块审计 + 反思 (生成→审计→反思→学习闭环) =====
+    # 审计五维指标 (地形/温度/降水/群系/风带雪盖) → 对比地球参考 → 写学习日志
+    # 低风险建议自动写入 overrides.json 供下次生成注入; 群系阈值等高风险仅打印
+    if enable_supervisor:
+        try:
+            from terrain.supervisor import audit_world, reflect_and_learn
+            report = audit_world(dem_m, lats, seed, size_px, tect_ctx=tect_ctx)
+            reflect_and_learn(report, apply_suggestions=apply_suggestions)
+        except Exception as e:
+            print(f"[Supervisor] 审计跳过 (不阻断主流程): {e}")
     return dem_m
 
 
-if __name__ == "__main__":
+def main():
+    """``generate_world.py`` 命令行入口。
+
+    解析 ``--seed / --size / --ckpt / --tect-res``，调用
+    :func:`generate_world` 生成一幅完整世界地图。
+    作为薄封装的 ``terrain/generate_world.py`` 以脚本方式直接运行时，
+    会经由此入口触发实际流程。
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--size", type=int, default=2048, choices=[2048, 4096])
@@ -575,3 +833,7 @@ if __name__ == "__main__":
     ap.add_argument("--tect-res", type=int, default=512)
     a = ap.parse_args()
     generate_world(seed=a.seed, size_px=a.size, ckpt_path=a.ckpt, tect_res=a.tect_res)
+
+
+if __name__ == "__main__":
+    main()

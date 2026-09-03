@@ -9,7 +9,14 @@ _file_dir = os.path.dirname(os.path.abspath(__file__))
 _dir = (os.path.dirname(_file_dir)
         if os.path.basename(_file_dir) in ("core", "scripts") else _file_dir)
 
-if __name__ == "__main__":
+def main():
+    """``batch_gen.py`` 命令行入口 —— 批量生成多种子世界地图。
+
+    解析 ``--seeds / --size``，对每个 seed 调用
+    :func:`generate_world.generate_world` 分别输出 ``seed{id}_map.png``
+    与 ``seed{id}_dem.npy`` 到 ``terrain/output/``。已存在的 DEM 会
+    被自动跳过以支持断点续跑。
+    """
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, nargs="+", default=list(range(1, 11)))
     ap.add_argument("--size", type=int, default=2048)
@@ -23,3 +30,7 @@ if __name__ == "__main__":
         print(f"\n===== seed {s} =====")
         generate_world(seed=s, size_px=a.size, out_png=png, out_npy=npy)
     print("\n全部完成")
+
+
+if __name__ == "__main__":
+    main()

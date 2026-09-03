@@ -24,6 +24,20 @@ terrain/data/
 terrain/checkpoints/
 terrain/cache/
 terrain/output/
+terrain/core/output/
+tmp_img_work/
+
+# 临时一次性脚本（按需移至 scripts/ 再入库）
+compose_prices.py
+extract_digits.py
+find_coords.py
+scan_prices.py
+verify_coords.py
+
+# Supervisor 运行时产物
+terrain/supervisor/log.jsonl
+terrain/supervisor/overrides.json
+terrain/supervisor/summary.md
 
 # 虚拟环境与 IDE
 .venv/

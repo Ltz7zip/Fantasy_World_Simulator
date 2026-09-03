@@ -6,5 +6,18 @@
 (2) 从 terrain.core.terrain_engine 做 ``*`` re-export。
 维护者注意：请只编辑 terrain/core/ 与 terrain/scripts/ 下的真实文件。
 """
+import os as _os
+import sys as _sys
+_PKG_DIR = _os.path.dirname(_os.path.abspath(__file__))
+_PARENT_DIR = _os.path.dirname(_PKG_DIR)
+if _PARENT_DIR not in _sys.path:
+    _sys.path.insert(0, _PARENT_DIR)
 import terrain  # noqa: F401
 from terrain.core.terrain_engine import *  # noqa: F401,F403
+
+if __name__ == "__main__":
+    import time as _time
+    from terrain.core.terrain_engine import main as _main
+    _t0 = _time.time()
+    _main()
+    print(f"\n总耗时: {_time.time() - _t0:.1f}s")

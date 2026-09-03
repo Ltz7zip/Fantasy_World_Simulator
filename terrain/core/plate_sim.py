@@ -790,10 +790,20 @@ def run_plate_sim(T=512, seed=0, K=12, n_hs=7,
     g_arc = _fbm(T, rng, 7.0, 2)
     e_oc += 4600.0 * np.exp(-(d_arc / 1.2) ** 2) * (g_arc > 0.05)
     # 海沟: 俯冲带窄带剖面 (深度随速率), 带宽≈100km, 面积占比≈1%
-    tr_prof = -(5700.0 + 700.0 * spn) - 2600.0 * np.exp(-(d_tr / 0.8) ** 2)
-    e_oc = np.where(oceanm & (d_tr < 1.3), np.minimum(e_oc, tr_prof), e_oc)
-    # 转换断层脊
-    e_oc += 260.0 * f1 * np.exp(-(d_tf / 2.6) ** 2)
+    # ---- v7.4: 用户报告"海沟深度不足(马里亚纳海沟-11000m vs 现-6400m), 且宽度偏窄(2-3px)"
+    #   (1) tr_prof 基础: -(5700+700*spn) → -(6800+900*spn), 基础底深 +1100m; 叠加高斯 -2800 (原-2600)
+    #       最快速率 spn≈1.0 → 理论最深 = -(6800+900) - 2800 = -10500m, 接近马里亚纳-11000m
+    #   (2) 高斯 σ: 0.8 → 1.0 (更深沟的水平宽度展宽 ~25%, 不再是2-3px细线, 视觉上更明显)
+    #   (3) 应用门限 d_tr < 1.3 → 1.6 (海沟覆盖的范围再宽一圈)
+    tr_prof = -(6800.0 + 900.0 * spn) - 2800.0 * np.exp(-(d_tr / 1.0) ** 2)
+    e_oc = np.where(oceanm & (d_tr < 1.6), np.minimum(e_oc, tr_prof), e_oc)
+    # 转换断层脊/谷: 强化洋中脊的双侧扩张纹理
+    # ---- v7.4: 用户报告"洋中脊两侧对称扩张纹理不明显, 缺乏转换断层切错"
+    #   原正峰 +260m → 双极: 脊轴 +420m (断块抬升) + 转换沟谷 −280m (相邻段切错下陷)
+    #   视觉效果: 洋中脊不再是单条平滑蜿蜒浅带, 而呈"脊-谷-脊"交替的 锯齿状扩张中心
+    #   (匹配地球洋中脊被转换断层 每50-200km 横切错断的真实形态)
+    e_oc += 420.0 * f1 * np.exp(-(d_tf / 2.8) ** 2) \
+           - 280.0 * (1.0 - f1) * np.exp(-(d_tf / 1.9) ** 2)
     # 热点岛链: 高门槛只抬热点核心 (尾迹弱区不动, 避免大范围浅台地)
     vb = gaussian_filter(vmem.reshape(T, T), 1.3)
     if vb.max() > 0:
@@ -1002,7 +1012,13 @@ def run_plate_sim(T=512, seed=0, K=12, n_hs=7,
     return elev, tect, crustm, margin, belt, rift
 
 
-if __name__ == "__main__":
+def main():
+    """``plate_sim.py`` 命令行入口 —— 450 Myr 板块演化预览。
+
+    解析 ``--seed / --T`` 执行 :func:`run_plate_sim`，将粗 DEM 与 4 张构造场
+    渲染为 5 联预览图保存到 ``terrain/output/plate_sim_preview.png``。
+    薄封装 ``terrain/plate_sim.py`` 以脚本方式运行时经由此入口进入。
+    """
     import os
     import argparse
     import matplotlib.pyplot as plt
@@ -1032,3 +1048,7 @@ if __name__ == "__main__":
     plt.tight_layout()
     plt.savefig(os.path.join(_dir, "output", "plate_sim_preview.png"), dpi=130)
     plt.show()
+
+
+if __name__ == "__main__":
+    main()

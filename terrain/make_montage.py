@@ -6,5 +6,15 @@
 (2) 从 terrain.scripts.make_montage 做 ``*`` re-export。
 维护者注意：请只编辑 terrain/core/ 与 terrain/scripts/ 下的真实文件。
 """
+import os as _os
+import sys as _sys
+_PKG_DIR = _os.path.dirname(_os.path.abspath(__file__))
+_PARENT_DIR = _os.path.dirname(_PKG_DIR)
+if _PARENT_DIR not in _sys.path:
+    _sys.path.insert(0, _PARENT_DIR)
 import terrain  # noqa: F401
 from terrain.scripts.make_montage import *  # noqa: F401,F403
+
+if __name__ == "__main__":
+    from terrain.scripts.make_montage import main as _main
+    raise SystemExit(_main())
