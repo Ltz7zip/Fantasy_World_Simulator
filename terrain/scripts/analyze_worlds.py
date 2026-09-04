@@ -5,11 +5,19 @@
 # 运行: python analyze_worlds.py   → 输出 output/analysis_results.json + 汇总表
 # ======================================================================
 import os
+import sys
 import json
 import numpy as np
 from scipy.ndimage import label as ndi_label, zoom as ndi_zoom
 from scipy.io.netcdf import netcdf_file
-from terrain_engine import (m2v, snowline_m, d8_flow_accumulation,
+
+# 允许直接 `python terrain/scripts/analyze_worlds.py` 运行：把项目根加入 sys.path
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(_HERE))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from terrain.core.terrain_engine import (m2v, snowline_m, d8_flow_accumulation,
                             fill_depressions, temperature_field,
                             precipitation_field, whittaker_biome,
                             periodic_fbm, warp_lonlat, _psd_slope,
@@ -209,7 +217,6 @@ def analyze(name, dem, conv):
     v01 = m2v(dem)
     land = dem > 0
     ocean = ~land
-    Aw = Wm / Wm.sum()                                   # 面积权重
     r = {"name": name}
 
     # --- 基础/尺度 ---

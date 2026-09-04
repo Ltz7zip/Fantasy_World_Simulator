@@ -39,7 +39,7 @@ for _p in (_TERRAIN_DIR, _CORE):
         sys.path.insert(0, _p)
 
 from . import (
-    audit_world, reflect_and_learn, get_overrides, reset_overrides,
+    audit_world, reflect_and_learn, reset_overrides,
     query_recent, aggregate_stats,
 )
 
@@ -90,7 +90,7 @@ def main(argv=None):
 
     # 默认: 审计指定 seed (lazy import 避免循环依赖)
     try:
-        from geo_context import WorldGeoContext
+        from terrain.core.geo_context import WorldGeoContext
     except ImportError as e:
         print(f"错误: 无法导入 geo_context ({e})")
         return 1

@@ -33,7 +33,7 @@ import os
 import sys
 import glob
 import time
-from typing import List, Tuple, Dict, Any, Optional, Protocol, Sequence, runtime_checkable
+from typing import Tuple, Dict, Any, Optional, Protocol, Sequence, runtime_checkable
 
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
@@ -187,9 +187,8 @@ class WorldGeoContext(TerrainDataProtocol):
             #    geo_context.py 已搬迁到 terrain/core/，向上一级得到 terrain/
             #    （output/ / checkpoints/ / data/ 仍保持 terrain/ 同级，与用户习惯一致）
             _here = os.path.dirname(os.path.abspath(__file__))
-            terrain_dir = (_HERE if '_HERE' in globals()
-                           else (os.path.dirname(_here)
-                                 if os.path.basename(_here) == "core" else _here))
+            terrain_dir = (os.path.dirname(_here)
+                           if os.path.basename(_here) == "core" else _here)
             output_dir = os.path.join(terrain_dir, "output")
             os.makedirs(output_dir, exist_ok=True)
 
@@ -582,11 +581,7 @@ def _generate_world_safe(seed: int, size: int,
     os.environ[_GEN_LOCK_ENV] = "1"
     try:
         # 延迟 import：避免 geo_context 被 generate_world import 时的循环导入
-        sys.path.insert(0, terrain_dir)
-        try:
-            from generate_world import generate_world  # type: ignore
-        finally:
-            sys.path.remove(terrain_dir)
+        from .generate_world import generate_world  # type: ignore
         # 以固定输出名生成；生成后重命名为 seed{seed}_dem.npy 便于下次快速命中
         default_npy = os.path.join(output_dir, "world_dem.npy")
         default_png = os.path.join(output_dir, "world_map.png")

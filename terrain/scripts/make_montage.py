@@ -4,9 +4,16 @@ import os
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
-from analyze_worlds import load_earth
-from terrain_engine import m2v, make_terrain_cmap
-from generate_world import render_world
+
+# 允许直接 `python terrain/scripts/make_montage.py` 运行：把项目根加入 sys.path
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(_HERE))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from terrain.scripts.analyze_worlds import load_earth
+from terrain.core.terrain_engine import m2v, make_terrain_cmap
+from terrain.core.generate_world import render_world
 
 _file_dir = os.path.dirname(os.path.abspath(__file__))
 _dir = (os.path.dirname(_file_dir)

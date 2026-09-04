@@ -9,7 +9,7 @@
 """
 import os, sys
 import numpy as np
-from scipy.ndimage import label as ndi_label, gaussian_filter
+from scipy.ndimage import gaussian_filter
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from terrain.core.terrain_engine import (continentality_index, ocean_current_effects,
@@ -129,7 +129,7 @@ def _load_tect_ctx(seed, size_px, tect_res=512):
     ms.sort(key=lambda p: -len(np.load(p, mmap_mode='r').files))
     try:
         d = np.load(ms[0])
-        elev_T = d["elev"]; tect_T = d["tect"]; crust_T = d["crust"]
+        tect_T = d["tect"]; crust_T = d["crust"]
         margin_T = d["margin"] if "margin" in d.files else None
         belt_T = d["belt"] if "belt" in d.files else None
         rift_T = d["rift"] if "rift" in d.files else None

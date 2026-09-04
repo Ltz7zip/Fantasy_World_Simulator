@@ -1,6 +1,8 @@
-# 幻想世界生成器 (terrain/) —— 使用文档
+# 幻想世界生成器 (terrain/) —— 使用文档 · v9.0
 
 板块演化 + 神经网络混合驱动的随机世界地图生成器。物理规则层负责地质 / 气候 / 水文的因果骨架，GAN 负责像素级地形纹理；同时提供 **4 面板可视化**与**单文件离线 HTML 交互报告**。
+
+> **v9.0 升级要点**：气候系统 v7.1–v7.4（大陆度指数 / 极地冰盖 / 泰加林修复）、河流水系 v8.3（骨架提取 + 沿程单调修复 / Hack 定律蜿蜒 / 牛轭湖 / 连续蓝度渲染）、新增 **深度学习模块 `terrain/dl/`**（DDPM → LDM → 物理监督 → 大规模推理 → 端到端管线 + ESRGAN 超分）、新增 **监督反思模块 `terrain/supervisor/`**（审计 → 反思 → 学习日志 → 自动注入 overrides）、安全加固（`torch.load(weights_only=True)` / URL scheme 白名单）、测试套件 33 → **512 项**。
 
 ## 目录结构
 
@@ -9,16 +11,25 @@ terrain/
 ├── README.md              ← 本文档 (安装 + 使用)
 ├── TECHNICAL.md           ← 技术文档 (架构 / 算法 / 接口 / 参数)
 │
-├── generate_world.py      ← 主入口: 生成完整世界 (DEM + 渲染图)
-├── rerender.py            ← 仅重渲染 (改渲染参数后用, 不重算地形)
-├── plate_sim.py           ← 板块演化模拟器 v3.0 (可单独调试)
-├── tectonics.py           ← 真实板块边界 → 构造条件场 (GAN 训练数据)
-├── terrain_engine.py      ← 核心: 物理工具 / 气候 / 侵蚀 / GAN 训练
-├── geo_context.py         ← 🆕 WorldGeoContext 单例: 坐标查询 / KPI 统计 / 多边形裁切
-├── visualize_context.py   ← 🆕 4 面板 PNG + 交互 HTML 报告 (探针/多边形/剖面联动)
+├── core/                  ← 核心源码 (8 个模块, 真实实现)
+│   ├── plate_sim.py           板块演化模拟器 v3.0 (可单独调试)
+│   ├── tectonics.py           真实板块边界 → 构造条件场 (GAN 训练数据)
+│   ├── terrain_engine.py      核心: 物理工具 / 气候 / 侵蚀 / GAN 训练 / v8.3 河流系统
+│   ├── generate_world.py      主入口: 生成完整世界 (DEM + 渲染图)
+│   ├── rerender.py            仅重渲染 (改渲染参数后用, 不重算地形)
+│   ├── geo_context.py         WorldGeoContext 单例: 坐标查询 / KPI 统计 / 多边形裁切
+│   └── visualize_context.py   4 面板 PNG + 交互 HTML 报告 (探针/多边形/剖面联动)
 │
-├── tests/                 ← 单元测试 (33 项, pytest)
-│   └── test_visualize_context.py
+├── dl/                    ← 深度学习模块 (v9.0 新增, 5 阶段)
+│   └── (VAE/DDPM/LDM/物理监督/超分/端到端管线, 详见 TECHNICAL §21)
+│
+├── supervisor/            ← 监督反思模块 (v9.0 新增)
+│   └── (审计 metrics / reflector / learning_log / CLI)
+│
+├── tests/                 ← 单元测试 (512 项, pytest)
+│   ├── test_visualize_context.py   可视化 / HTML / geo_context (33 项)
+│   ├── test_supervisor.py          监督反思 (32 项)
+│   └── test_dl_phase1..5.py        深度学习 5 阶段 (447 项)
 │
 ├── data/                  ← 原始数据 (重训 GAN 需要; 生成世界不需要)
 │   ├── ETOPO1_Ice_g_gmt4.grd        # 全球 DEM (~890MB, 公有领域)
@@ -33,7 +44,7 @@ terrain/
     ├── world_dem.npy                 # 全球高程 (米, S×S float32, 行=纬北→南 / 列=经)
     ├── world_skeleton.png            # GAN 前的构造骨架
     ├── geoctx_visual_seed{}.png      # 4 面板可视化 (高程/坡度/地理带/剖面)
-    └── geoctx_report_seed{}.html      # 🆕 单文件离线交互报告 (≈4 MB)
+    └── geoctx_report_seed{}.html      # 单文件离线交互报告 (≈4 MB)
 ```
 
 ## 安装步骤
@@ -87,7 +98,8 @@ python terrain/generate_world.py --seed 0 --size 2048
 | 批量生成多种子                   | `python terrain/batch_gen.py --seeds 1 2 3 4 5`                                                                                                       |
 | 地理指标检验 (vs 地球)            | `python terrain/analyze_worlds.py` → 输出 `analysis_results.json`                                                                                       |
 | 生成对比拼图                    | `python terrain/make_montage.py`                                                                                                                      |
-| 单元测试 (33 项)               | `pytest terrain/tests/test_visualize_context.py -v`                                                                                                   |
+| 单元测试 (512 项)               | `pytest terrain/tests/ -v`                                                                                                   |
+| 监督审计 + 反思学习              | `python -m terrain.supervisor --seed 42 --size-px 2048`                                                                       |
 | 重训 GAN                    | 删除 `checkpoints/best_terrain_gan_v5.pth` 后 `python terrain/terrain_engine.py`（需 `data/ETOPO1`, 2.5\~4h / MPS）                                         |
 
 ### 叠加元素的正确格式
@@ -107,7 +119,7 @@ python terrain/generate_world.py --seed 0 --size 2048
 
 ## 缓存管理
 
-- **板块缓存** `cache/plate_sim_v3_T{分辨率}_seed{种子}.npz`：同一 seed + 分辨率直接复用（v7.0 起版本号 v22→v3）。
+- **板块缓存** `cache/plate_sim_v3_T{分辨率}_seed{种子}.npz`：同一 seed + 分辨率直接复用（v3.0 超大陆旋回版缓存）。
   修改了 `plate_sim.py` 想让某 seed 重跑？删除对应 npz 文件即可。
 
 - **构造场缓存** `tect_cache_*.npz`：分辨率或板块边界 JSON 版本不匹配时自动重算。
@@ -141,7 +153,7 @@ git log --oneline             # 查看历史提交
 
 ### Q2: 提示 "请先用 v6.3 重训 (12 通道)"
 
-检查点版本不匹配。用 `checkpoints/best_terrain_gan_v5.pth`（项目已内置 v5 权重，12 通道），或按 TECHNICAL.md §4 重训。
+检查点版本不匹配。用 `checkpoints/best_terrain_gan_v5.pth`（项目已内置 v5 权重，12 通道条件 GAN），或按 TECHNICAL.md §4 重训。
 
 ### Q3: `ValueError: could not convert string to float: '北海'`
 
@@ -175,12 +187,13 @@ git log --oneline             # 查看历史提交
 用 `geo_context.py` 的公开单例（见 TECHNICAL §16）：
 
 ```python
-import sys; sys.path.insert(0, 'terrain')
-from geo_context import get_ctx
+from terrain.geo_context import get_ctx
 ctx = get_ctx(seed=1, size=2048)
 print(ctx.get_elevation(39.9, 116.4))   # 北京: 海拔 米
 print(ctx.region_stats(polygon=[(30,-5),(30,35),(45,35),(45,-5)]))  # 地中海方块统计
 ```
+
+> v9.0 起所有核心模块使用相对/绝对导入，`terrain` 包可直接 `import terrain.xxx`，无需手动 `sys.path` 注入。
 
 ### Q8: 设备要求？
 

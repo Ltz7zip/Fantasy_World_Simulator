@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-generate_world.py v7.0 —— 板块演化模拟世界生成器
+generate_world.py v9.0 —— 板块演化模拟世界生成器
 
 =============================================================
 一级: run_plate_sim v3.0 (450 Myr, 有缓存) → 粗DEM + 4构造场
@@ -11,6 +11,8 @@ v7.0 七大地理维度修复层（M1-M6） (基于10种子七维地理检验报
   P0 陆架-陆坡剖面修复 + 陆地直方图重映射(→地球实测分位)
   P1 岛弧链/热点岛链盖章 + 干流河谷雕刻
   P2 板内造山带盖章(打破山地-俯冲带过纯耦合)
+v8.3 河流水系系统: 骨架提取+单调修复 / Hack 定律蜿蜒 / 牛轭湖 / 连续蓝度渲染
+v9.0 监督反思: generate_world 末尾接入 supervisor 审计 → 反思 → overrides 注入
 运行: python generate_world.py --seed 7 --size 2048
 =============================================================
 """
@@ -22,12 +24,12 @@ import torch
 import matplotlib.pyplot as plt
 from scipy.ndimage import (gaussian_filter, distance_transform_edt,
                            zoom as ndi_zoom, label as ndi_label,
-                           minimum_filter, maximum_filter, binary_dilation,
+                           minimum_filter, maximum_filter,
                            median_filter)
-from terrain_engine import (device, m2v, v2m, block_reduce, d8_flow_accumulation,
+from .terrain_engine import (device, m2v, v2m, block_reduce, d8_flow_accumulation,
                             snowline_m, value_fbm, ridged_fbm, sharpen_coastline,
                             directional_band_noise,
-                            lowfreq_consistency, suppress_hallucinated_land,
+                            lowfreq_consistency,
                             polar_ice_mask, make_terrain_cmap, UNet,
                             temperature_field, precipitation_field, whittaker_biome,
                             BIOME_COLORS, fill_depressions, droplet_erosion,
@@ -41,7 +43,7 @@ from terrain_engine import (device, m2v, v2m, block_reduce, d8_flow_accumulation
                             add_craton_basins, ocean_hist_final,
                             continentality_index, smooth_biome_labels,
                             enhance_ocean_floor, classify_landforms)
-from plate_sim import run_plate_sim
+from .plate_sim import run_plate_sim
 
 
 def fbm1d(n, sigma, rng):
@@ -536,7 +538,7 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
     ckpt_path = ckpt_path or os.path.join(_dir, "checkpoints", "best_terrain_gan_v5.pth")
     out_png = out_png or os.path.join(_dir, "output", "world_map.png")
     out_npy = out_npy or os.path.join(_dir, "output", "world_dem.npy")
-    ck = torch.load(ckpt_path, map_location=device)
+    ck = torch.load(ckpt_path, map_location=device, weights_only=True)
     assert int(ck.get("cfg", {}).get("in_ch", 0)) == 12, "请先用 v6.3 重训 (12通道)"
     gen = UNet(in_ch=12, base=32).to(device)
     gen.load_state_dict(ck["gen_ema"]); gen.eval()

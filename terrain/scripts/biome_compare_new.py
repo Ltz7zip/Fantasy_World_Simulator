@@ -9,7 +9,6 @@ precipitation_field/whittaker_biome (传 ci) 重算群系, 输出对比表 + JSO
 import os, sys, json
 import numpy as np
 from scipy.io.netcdf import netcdf_file
-from scipy.ndimage import zoom as ndi_zoom
 
 # 绝对导入避免 shim 循环
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
@@ -58,7 +57,6 @@ def analyze(name, dem, seed=0):
     coslat = np.clip(np.cos(np.deg2rad(lats)), 0.0, 1.0)
     Wm = coslat[:, None].astype(np.float64)
     land = dem >= 1.0
-    Aw = Wm / Wm.sum()
     r = {"name": name}
     r["land_frac"] = float((land * Wm).sum() / (Wm.sum() * S))
     r["peak"] = round(float(dem.max()), 0)

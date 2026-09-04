@@ -44,11 +44,11 @@ matplotlib.use("Agg")  # 无显示环境安全；交互式时调用方自行切�
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap, BoundaryNorm
 from matplotlib.patches import Polygon as MplPolygon
-from matplotlib.lines import Line2D
 
 # 交互 HTML 报告需要的 I/O / 编码 / JSON
 import io
 import json
+import html
 import base64
 import datetime as _dt
 from scipy.ndimage import zoom as _ndi_zoom
@@ -58,7 +58,7 @@ _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
 
-from geo_context import WorldGeoContext  # noqa: E402
+from .geo_context import WorldGeoContext  # noqa: E402
 
 
 # ============================================================================
@@ -273,17 +273,11 @@ def build_geo_figure(
     if downsample_for_display and downsample_for_display > 1:
         step = downsample_for_display
         dem_d = dem[::step, ::step]
-        lats_d = lats[::step]
-        lons_d = lons[::step]
     else:
         dem_d = dem
-        lats_d = lats
-        lons_d = lons
-
-    dem_extent = (lons_d[0], lons_d[-1], lats_d[0], lats_d[-1])  # (左,右,下,上)
 
     # --- 计算坡度场（用于渲染面板 2） ---
-    from geo_context import _compute_slope_field
+    from .geo_context import _compute_slope_field
     slope_field = _compute_slope_field(dem, lats, lons)
     slope_d = slope_field if downsample_for_display == 1 else slope_field[::step, ::step]
     land_d = dem_d >= 1.0
@@ -991,7 +985,7 @@ def _build_probe_markers_html(probe_info):
         px = (p["lon"] + 180.0) / 360.0
         py = (90.0 - p["lat"]) / 180.0
         cls = "land" if p["land"] else "sea"
-        safe_name = str(p.get("name", "P")).replace("<", "&lt;").replace(">", "&gt;")
+        safe_name = html.escape(str(p.get("name", "P")), quote=True)
         style_m = f"left:{px*100:.4f}%;top:{py*100:.4f}%"
         style_l = f"left:{px*100:.4f}%;top:{py*100:.4f}%;" + \
                   f"color:{'#b91c1c' if p['land'] else '#0369a1'}"
@@ -1006,7 +1000,7 @@ def _build_probe_table_rows(probe_info):
     rows = []
     for p in probe_info:
         cls = "land" if p["land"] else "sea"
-        safe_name = str(p.get("name", "P")).replace("<", "&lt;").replace(">", "&gt;")
+        safe_name = html.escape(str(p.get("name", "P")), quote=True)
         rows.append(
             f'<tr data-lat="{p["lat"]:.5f}" data-lon="{p["lon"]:.5f}">'
             f'<td><span class="ld {cls}"></span>{safe_name}</td>'
@@ -1136,7 +1130,7 @@ def export_html_report(
     # —— 三张图层 PNG base64 ——
     layer_dem_b64 = _ndarray_to_png_b64(
         dem, make_terrain_cmap(), vmin=-10500, vmax=8900, target_s=layer_size)
-    from geo_context import _compute_slope_field
+    from .geo_context import _compute_slope_field
     slope = _compute_slope_field(dem, ctx.lat_grid, ctx.lon_grid)
     land_mask = ctx.land_mask
     layer_slope_b64 = _ndarray_to_png_b64(
@@ -1191,7 +1185,7 @@ def export_html_report(
 
     # —— 组装 HTML ——
     payload = dict(
-        TITLE=title, SEED=seed, SIZE=S, GEN_TIME=gen_time,
+        TITLE=html.escape(title, quote=True), SEED=seed, SIZE=S, GEN_TIME=gen_time,
         LAND_RATIO=land_ratio, MONT_RATIO=mont_ratio,
         PEAK=dem_max, TROUGH=dem_min,
         LAYER_DEM=layer_dem_b64, LAYER_SLOPE=layer_slope_b64, LAYER_GEO=layer_geo_b64,
@@ -1207,10 +1201,10 @@ def export_html_report(
         PROFILE_A=json.dumps([float(latA), float(lonA)]),
         PROFILE_B=json.dumps([float(latB), float(lonB)]),
         PROFILE_POINTS=json.dumps(profile_points, ensure_ascii=False, separators=(",", ":")),
-        DEM_PATH=dem_path, CMD=cmd,
+        DEM_PATH=html.escape(dem_path, quote=True), CMD=cmd,
     )
     try:
-        html = _HTML_TEMPLATE % payload
+        html_out = _HTML_TEMPLATE % payload
     except (ValueError, KeyError) as exc:
         raise RuntimeError(
             f"HTML 模板格式化失败: {exc}\n"
@@ -1219,7 +1213,7 @@ def export_html_report(
     # —— 写入 ——
     def _save(p):
         with open(p, "w", encoding="utf-8") as fh:
-            fh.write(html)
+            fh.write(html_out)
     try:
         _save(output_path)
     except PermissionError:

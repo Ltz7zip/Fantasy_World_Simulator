@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-terrain_engine.py v7.0 —— 物理工具 / 气候模型 / GAN (v5.1 UNet 12 通道条件) / 侵蚀 / 渲染 / 训练
+terrain_engine.py v9.0 —— 物理工具 / 气候模型 / GAN (v5.1 UNet 12 通道条件) / 侵蚀 / v8.3 河流系统 / 渲染 / 训练
 
 =============================================================
 v7.0 新增：洋流/季风效应(M4)、峡湾/台地/珊瑚礁(M3)、克拉通大流域(M5)、深洋直方图终检(M6)
+v7.1–v7.4：大陆度指数 CI、极地冰盖过渡带、气候去伪影、泰加林修复
+v8.3：河流水系系统（骨架+单调修复 / Hack 定律蜿蜒 / 牛轭湖 / 连续蓝度渲染）
 数据: ETOPO1 (NOAA) 自动下载(带重试) / 本地 npy / 合成兜底
 =============================================================
 """
@@ -22,8 +24,7 @@ from torch.utils.data import Dataset, DataLoader
 from scipy.ndimage import (gaussian_filter, distance_transform_edt,
                            map_coordinates, zoom as ndi_zoom,
                            median_filter, label as ndi_label,
-                           maximum_filter, minimum_filter, uniform_filter,
-                           binary_dilation)
+                           maximum_filter, minimum_filter, uniform_filter)
 
 try:
     from scipy.io import netcdf_file
@@ -724,7 +725,6 @@ def carve_along_centerlines(v01, lines, acc, land, max_depth=0.045,
     其他参数同 v8.2。
     """
     H, W = v01.shape
-    acc_flat = acc.ravel()
     land_flat = land.ravel()
     v_flat = v01.astype(np.float64).ravel().copy()
     # 汇水面积分位数作参考
@@ -843,7 +843,6 @@ def carve_along_centerlines(v01, lines, acc, land, max_depth=0.045,
                     # 主轴长度 = 2*d_eu, 次轴 = d_eu
                     ry, rx = max(d_eu*1.1, 3.0), max(d_eu*0.6, 1.8)
                     # 深度 = 两侧主流均值 × oxbow 因子
-                    k_avg_a = A_REF * 0.2
                     # 近似: 按 0.6*max_depth 直接给一个合理静水深度
                     d_oxb = float(max_depth) * float(oxbow_depth_factor)
                     # 雕刻一个椭圆高斯洼地 (只在陆地内生效)
@@ -975,7 +974,6 @@ def paint_rivers_rgb(rgb, acc, land, rng, base_q=0.995,
         D_near = distance_transform_edt(~mask_core)
         ring = (D_near >= 2.0) & (D_near <= 10.0) & land
         if ring.any():
-            from scipy.ndimage import gaussian_filter as _gf
             # 局部洼地 v < 周边平滑均值 - 0.007 → 疑似静水湖 (避免把山丘染蓝)
             # (注: 仅使用 acc 参数无法直接获得 v, 因此跳过 oxbow 淡染检测，
             #  改由 call-side 使用 paint_meander_lakes 明确传入 v01 再染 oxbow)
@@ -1019,22 +1017,40 @@ def paint_rivers_rgb(rgb, acc, land, rng, base_q=0.995,
 # ==================== 3. ETOPO1 获取与加载 ====================
 ETOPO1_URLS = [
     "https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO1/data/ice_surface/grid_registered/ETOPO1_Ice_g_gmt4.grd",
-    "http://www.ngdc.noaa.gov/mgg/global/relief/ETOPO1/data/ice_surface/grid_registered/ETOPO1_Ice_g_gmt4.grd",
+    "https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO1/data/ice_surface/grid_registered/ETOPO1_Ice_g_gmt4.grd",
 ]
+# ETOPO1 下载大小上限 (~1GB), 文件实际约 450MB
+_ETOPO1_MAX_BYTES = 1024 * 1024 * 1024
 
 
 def download_dem(dest, attempts=3, timeout=180):
     if os.path.exists(dest):
         return dest
     print("开始下载 ETOPO1 全球 DEM (约450MB, 公有领域)...")
+    from urllib.parse import urlparse as _urlparse
     last = None
     for url in ETOPO1_URLS:
+        # scheme 白名单校验: 仅允许 http/https, 防止 file:// 等 SSRF
+        _scheme = _urlparse(url).scheme.lower()
+        if _scheme not in ("http", "https"):
+            last = ValueError(f"不允许的 URL scheme: {_scheme!r}")
+            continue
         for a in range(1, attempts + 1):
             tmp = dest + ".part"
             try:
                 socket.setdefaulttimeout(timeout)
-                req = urllib.request.urlopen(urllib.request.Request(url), timeout=timeout)
+                _req = urllib.request.Request(
+                    url,
+                    headers={"User-Agent":
+                             "FantasyWorldSimulator/1.0 (+https://github.com)"},
+                )
+                req = urllib.request.urlopen(_req, timeout=timeout)  # nosec B310 - scheme 已在循环开头白名单校验
                 total = int(req.headers.get('Content-Length', 0))
+                # 若服务器声明的大小超过上限, 直接拒绝
+                if total and total > _ETOPO1_MAX_BYTES:
+                    raise ValueError(
+                        f"Content-Length {total/1e6:.0f}MB 超过上限 "
+                        f"{_ETOPO1_MAX_BYTES/1e6:.0f}MB")
                 done, t0 = 0, time.time()
                 with open(tmp, 'wb') as f:
                     while True:
@@ -1043,6 +1059,10 @@ def download_dem(dest, attempts=3, timeout=180):
                             break
                         f.write(chunk)
                         done += len(chunk)
+                        # 实际下载量也不能超过上限
+                        if done > _ETOPO1_MAX_BYTES:
+                            raise ValueError(
+                                f"下载量超过上限 {_ETOPO1_MAX_BYTES/1e6:.0f}MB")
                         if total:
                             print(f"\r  {done/1e6:5.0f}/{total/1e6:.0f} MB  "
                                   f"{done/max(1e-9, time.time()-t0)/1e6:5.1f} MB/s", end='')
@@ -1356,7 +1376,7 @@ def make_tect_provider(dem):
     """真实 DEM → Bird2003 构造条件场; 合成兜底 → None(全零通道)"""
     if type(dem).__name__ != "GlobalDEM":
         return None
-    from tectonics import TectField, download_tectonic
+    from .tectonics import TectField, download_tectonic
     bjson = download_tectonic()
     proxy = dem.z[::16, ::16].astype(np.float32) * dem.scale + dem.offset
     tf = TectField(dem.ny, dem.nx, bjson, dem_for_proxy=proxy)
@@ -3303,7 +3323,6 @@ def classify_landforms(dem_m, lats, land=None,
         # ---- 山地高度子类 (bit4-5): 高山>3500m / 中山1000-3500m / 低山<1000m ----
         mtn_mask = (lf & 0x0F) == 0
         if mtn_mask.any():
-            high = mtn_mask & (elev > 3500.0)
             mid = mtn_mask & (elev > 1000.0) & (elev <= 3500.0)
             low_mtn = mtn_mask & (elev <= 1000.0)
             lf[mid] |= 0x10       # bit4-5 = 01 (中山)
@@ -3580,7 +3599,11 @@ def _psd_slope(x):
     for k in range(1, len(bins)):
         sel = idx == k
         if sel.sum() > 8:
-            rp.append(bins[k]); pp.append(p.ravel()[sel].mean())
+            val = p.ravel()[sel].mean()
+            if val > 0:                        # 过滤零功率 bin, 避免 log(0)=-inf
+                rp.append(bins[k]); pp.append(val)
+    if len(rp) < 2:                             # 有效 bin 不足无法拟合
+        return float('nan')
     return float(np.polyfit(np.log(rp), np.log(pp), 1)[0])
 
 
@@ -3836,7 +3859,7 @@ def train(dem):
 
     """
     # ==================== 可视化 (A9) ====================
-    ckpt = torch.load(save_path, map_location=device)
+    ckpt = torch.load(save_path, map_location=device, weights_only=True)
     gen.load_state_dict(ckpt['gen_ema'])
     gen.eval()
     cmap = make_terrain_cmap()
@@ -3979,7 +4002,7 @@ def visualize_only(dem, ckpt_path=None):
         os.path.dirname(os.path.abspath(__file__)),
         "checkpoints", "best_terrain_gan_v5.pth")
     size, block, n_val = 256, 8, 120
-    ckpt = torch.load(ckpt_path, map_location=device)
+    ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
     assert int(ckpt.get("cfg", {}).get("in_ch", 0)) == 12, \
         "旧版 8 通道 checkpoint 与 v6.3 不兼容, 请删除后重训"
     tect_provider = make_tect_provider(dem)

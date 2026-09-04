@@ -22,8 +22,8 @@ from __future__ import annotations
 import numpy as np
 
 # 复用 terrain_engine 已有的纬度降水参考曲线 (地球 ITCZ 纬向基础降水)
-# terrain/__init__.py 已把 core/ 注入 sys.path, 可直接扁平导入
-from terrain_engine import _P_LAT, _P_MM, BIOME_NAMES  # noqa: F401  (复用, 避免重复定义)
+# 通过 terrain.core 包导入, 静态可解析
+from terrain.core.terrain_engine import _P_LAT, _P_MM, BIOME_NAMES  # noqa: F401  (复用, 避免重复定义)
 
 # ─── 全球地形参考 (来源: ETOPO1 / NOAA 实测) ───
 GLOBAL = dict(

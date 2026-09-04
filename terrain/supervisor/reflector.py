@@ -29,7 +29,7 @@ from typing import List, Dict, Optional
 import json
 import os
 
-from .metrics import SupervisorMetrics, LAT_BANDS, BAND_NAMES
+from .metrics import SupervisorMetrics, BAND_NAMES
 from .references import (
     GLOBAL, TOLERANCE, SEVERITY,
     BIOME_RATIO_BY_IDX, BIOME_NAMES,

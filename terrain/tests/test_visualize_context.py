@@ -36,12 +36,12 @@ for _p in (_PROJECT_ROOT, _TERRAIN_DIR):
         sys.path.insert(0, _p)
 
 # visualize_context 内部已经 matplotlib.use("Agg") 所以这里直接 import 即可
-import visualize_context as VC
-from visualize_context import (
+from terrain.core import visualize_context as VC
+from terrain.core.visualize_context import (
     _parse_points, _parse_poly, _parse_profile,
     build_geo_figure, main, _sample_profile,
 )
-from geo_context import WorldGeoContext
+from terrain.core.geo_context import WorldGeoContext
 
 
 # ===========================================================================
@@ -400,7 +400,7 @@ class TestCLIMain:
                     fh.write(b"\x89PNG\r\n\x1a\n" + b"\0" * 1000)
 
         # 把 build_geo_figure mock 掉直接返回 _FakeFig（避免真实绘图）
-        import visualize_context as _vc
+        import terrain.core.visualize_context as _vc
         monkeypatch.setattr(_vc, "build_geo_figure",
                             lambda *a, **kw: (_FakeFig(), np.empty((2, 2)), None, {}))
         # main() 末尾会 plt.close(fig)，但 _FakeFig 不是真 Figure，会 TypeError；
@@ -445,7 +445,7 @@ class TestCLIMain:
 # ===========================================================================
 
 def test_protocol_compliance():
-    from geo_context import TerrainDataProtocol, get_ctx
+    from terrain.core.geo_context import TerrainDataProtocol, get_ctx
     ctx = get_ctx(seed=1, size=2048)
     assert isinstance(ctx, TerrainDataProtocol), \
         "WorldGeoContext 必须满足 TerrainDataProtocol"
@@ -459,7 +459,7 @@ def test_protocol_compliance():
 
 
 def test_get_ctx_shortcut_returns_same_singleton():
-    from geo_context import get_ctx
+    from terrain.core.geo_context import get_ctx
     a = get_ctx(seed=1, size=2048)
     b = WorldGeoContext.from_seed(seed=1, size=2048)
     assert a is b, "get_ctx() 简写应与 from_seed() 返回同一单例"

@@ -44,4 +44,4 @@ __all__ = [
     "generate_world", "run_plate_sim",
     "build_geo_figure", "build_html_report", "export_html_report",
 ]
-__version__ = "7.0.0"
+__version__ = "9.0.0"

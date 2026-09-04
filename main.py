@@ -17,7 +17,6 @@ GUI 模式提供：
 from __future__ import annotations
 
 import argparse
-import os
 import shutil
 import subprocess
 import sys
@@ -140,8 +139,9 @@ def action_visualize(opts: VisualizeOptions) -> tuple[bool, str]:
         probes = _parse_points(args.points)
         poly   = _parse_poly(args.polygon)
         prof   = _parse_profile(args.profile)
-        fig, info = build_geo_figure(opts.seed, opts.size,
-                                     probes=probes, polygon=poly, profile=prof)
+        fig, axes, ctx, info = build_geo_figure(opts.seed, opts.size,
+                                                probe_points=probes,
+                                                polygon=poly, profile=prof)
         opts.out.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(opts.out, dpi=150, bbox_inches="tight")
         try:
@@ -149,7 +149,13 @@ def action_visualize(opts: VisualizeOptions) -> tuple[bool, str]:
             plt.close(fig)
         except Exception:
             pass
-        stats = "; ".join(f"{k}={v}" for k, v in info.get("kpis", {}).items())
+        kpis = {
+            "陆地占比": f"{info.get('land_ratio', 0)*100:.1f}%",
+            "山地占比": f"{info.get('mountain_ratio', 0)*100:.1f}%",
+            "最高峰": f"{info.get('dem_max', 0):.0f}m",
+            "最深海沟": f"{info.get('dem_min', 0):.0f}m",
+        }
+        stats = "; ".join(f"{k}={v}" for k, v in kpis.items())
         return True, f"✅ 4 面板可视化已保存：{opts.out}\n   KPI：{stats}"
     except Exception as exc:  # pragma: no cover
         return False, f"❌ 可视化失败：{exc}\n{traceback.format_exc()}"
@@ -176,22 +182,48 @@ def action_html(opts: HtmlOptions) -> tuple[bool, str]:
     try:
         import matplotlib; matplotlib.use("Agg")
         from terrain.core.visualize_context import (
-            _parse_points, _parse_poly, _parse_profile, build_html_report,
+            _parse_points, _parse_poly, _parse_profile,
+            build_html_report, build_geo_figure,
         )
         probes = _parse_points(opts.points)
         poly   = _parse_poly(opts.polygon)
         prof   = _parse_profile(opts.profile)
-        out_html, info = build_html_report(
+        out_html, ctx = build_html_report(
             seed=opts.seed, size=opts.size,
-            probes=probes, polygon=poly, profile=prof,
+            probe_points=probes, polygon=poly, profile=prof,
+            output_path=str(opts.html_out),
             layer_size=opts.layer_size, query_size=opts.query_size,
-            html_output=str(opts.html_out),
-            generate_png=not opts.no_png,
         )
         lines = [f"✅ HTML 报告已保存：{out_html}"]
-        if "png" in info and info["png"]:
-            lines.append(f"   4 面板 PNG：{info['png']}")
-        lines.append("   KPI：" + "; ".join(f"{k}={v}" for k, v in info.get("kpis", {}).items()))
+        png_path = None
+        if not opts.no_png:
+            fig, axes, _, info = build_geo_figure(
+                opts.seed, opts.size,
+                probe_points=probes, polygon=poly, profile=prof,
+            )
+            png_path = opts.html_out.with_suffix(".png")
+            png_path.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(png_path, dpi=150, bbox_inches="tight")
+            try:
+                import matplotlib.pyplot as plt
+                plt.close(fig)
+            except Exception:
+                pass
+            lines.append(f"   4 面板 PNG：{png_path}")
+            kpis = {
+                "陆地占比": f"{info.get('land_ratio', 0)*100:.1f}%",
+                "山地占比": f"{info.get('mountain_ratio', 0)*100:.1f}%",
+                "最高峰": f"{info.get('dem_max', 0):.0f}m",
+                "最深海沟": f"{info.get('dem_min', 0):.0f}m",
+            }
+        else:
+            kpis = {
+                "陆地占比": f"{float(ctx.land_mask.mean())*100:.1f}%",
+                "山地占比": f"{float(ctx.mountain_mask.mean())*100:.1f}%",
+                "最高峰": f"{float(ctx.dem.max()):.0f}m",
+                "最深海沟": f"{float(ctx.dem.min()):.0f}m",
+            }
+        lines.append("   KPI：" + "; ".join(f"{k}={v}" for k, v in kpis.items()))
         return True, "\n".join(lines)
     except Exception as exc:  # pragma: no cover
         return False, f"❌ HTML 报告失败：{exc}\n{traceback.format_exc()}"
@@ -216,7 +248,7 @@ _MENU_BANNER = r"""
 | |_ / _` | '_ \| '_ \| __/ __|/ _ \| || '_ \ | __| |_ | || __|| __|/ _ \| '__|
 |  _| (_| | | | | | | | |_\__ \  __/| || | | || |_|  _|| || |_ | |_|  __/| |
 |_|  \__,_|_| |_|_| |_|\__|___/\___|___|_| |_| \__|_|  |_| \__| \__|\___||_|
-                    Fantasy World Simulator — v7.0.0 Launcher
+                    Fantasy World Simulator — v9.0.0 Launcher
 """
 
 
@@ -313,11 +345,11 @@ def try_run_gui() -> bool:
     except Exception:
         return False
 
-    from PyQt5.QtCore import Qt, QThread, pyqtSignal
+    from PyQt5.QtCore import QThread, pyqtSignal
     from PyQt5.QtGui import QFont
     from PyQt5.QtWidgets import (
         QApplication, QMainWindow, QWidget, QLabel, QLineEdit, QPushButton,
-        QComboBox, QCheckBox, QTextEdit, QFileDialog, QMessageBox, QTabWidget,
+        QCheckBox, QTextEdit, QFileDialog, QMessageBox, QTabWidget,
         QSpinBox, QFormLayout, QHBoxLayout, QVBoxLayout, QGroupBox,
     )
 
@@ -338,7 +370,7 @@ def try_run_gui() -> bool:
     class _Main(QMainWindow):
         def __init__(self):
             super().__init__()
-            self.setWindowTitle("Fantasy World Simulator — 启动器 v7.0.0")
+            self.setWindowTitle("Fantasy World Simulator — 启动器 v9.0.0")
             self.resize(980, 660)
             font = QFont(); font.setPointSize(12); self.setFont(font)
 
@@ -456,7 +488,7 @@ def try_run_gui() -> bool:
 
         # ---- 辅助：写日志、开启工作线程 ----
         def _append(self, s: str):
-            self.log.moveCursor(QtGui.QTextCursor.End if False else 1)  # QTextCursor.End = 1
+            self.log.moveCursor(1)  # QTextCursor.End = 1
             # 用更简单的方式：setPlainText 累加
             self.log.setPlainText(self.log.toPlainText() + ("\n" if self.log.toPlainText() else "") + s)
             self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())

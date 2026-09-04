@@ -55,6 +55,16 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# JetBrains IDE 代码检查报告产物（PyCharm Inspect 生成）
+/index.html
+/script.js
+/styles.css
+
+# 深度学习模块运行时产物（模型权重/缓存，体积大可再生）
+terrain/dl/checkpoints/
+terrain/dl/runs/
+terrain/dl/logs/
+
 # TRAE 工作区私有目录（.trae/skills 为本地 Skill 定义，不跨机器共享）
 .trae/
 

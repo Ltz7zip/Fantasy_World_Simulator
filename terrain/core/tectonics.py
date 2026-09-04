@@ -32,6 +32,22 @@ _DS = 8   # 距离场计算分辨率 (1 cell = 8 arcmin)
 
 _TYPE2GROUP = {"SUB": 1, "OCB": 1, "CCB": 1, "OSR": 2, "CRB": 2, "OTF": 3, "CTF": 3}
 
+# GeoJSON 下载大小上限 (~50MB), 防止异常大响应耗尽内存
+_GEOJSON_MAX_BYTES = 50 * 1024 * 1024
+
+
+def _safe_urlopen(url, timeout=90):
+    """带 scheme 校验 + UA 头的 urlopen, 仅允许 http/https。"""
+    from urllib.parse import urlparse
+    scheme = urlparse(url).scheme.lower()
+    if scheme not in ("http", "https"):
+        raise ValueError(f"不允许的 URL scheme: {scheme!r} (仅支持 http/https)")
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "FantasyWorldSimulator/1.0 (+https://github.com)"},
+    )
+    return urllib.request.urlopen(req, timeout=timeout)  # nosec B310 - scheme 已在上行白名单校验
+
 
 def proximity_fields(masks, cell_arcmin, r_general=40.0, r_type=16.0):
     """masks: [any, conv, div, trans] bool → (4,H,W) 邻近场, 距离物理单位=角分"""
@@ -57,8 +73,10 @@ def download_tectonic(dest=None):
     for url in GEOJSON_URLS:
         try:
             print(f"下载板块边界数据 ({url.split('/')[2]}) ...")
-            with urllib.request.urlopen(url, timeout=90) as r:
-                data = r.read()
+            with _safe_urlopen(url, timeout=90) as r:
+                data = r.read(_GEOJSON_MAX_BYTES + 1)
+            if len(data) > _GEOJSON_MAX_BYTES:
+                raise ValueError(f"响应超过大小上限 {_GEOJSON_MAX_BYTES/1e6:.0f}MB")
             js = _json.loads(data)                      # 校验是合法GeoJSON而非错误页
             if "features" not in js or len(js["features"]) == 0:
                 raise ValueError("响应不是有效的 GeoJSON")

@@ -19,23 +19,22 @@ L200-216）完全同口径、同 RNG 种子，结果 bitwise 一致。
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 
 import numpy as np
 from scipy.ndimage import gaussian_filter, zoom as ndi_zoom
 
-# 复用 terrain_engine 已有函数 (扁平导入, 与 generate_world.py L27 同风格)
-from terrain_engine import (
+# 复用 terrain_engine 已有函数 (通过 terrain.core 包导入, 静态可解析)
+from terrain.core.terrain_engine import (
     temperature_field, precipitation_field, whittaker_biome,
     continentality_index, ocean_current_effects, smooth_biome_labels,
-    snow_area_by_band, snowline_m, m2v, v2m,
+    snow_area_by_band, m2v,
     BIOME_NAMES,
     _psd_slope, _fractal_dim, _slope_stats, _coherence,
 )
 from .references import (
     TEMP_LAT, TEMP_C, PRECIP_LAT, PRECIP_MM,
-    SNOW_BANDS, SNOW_RATIO_REF, BIOME_RATIO_BY_IDX,
 )
 
 # 山地阈值 (与 geo_context._MOUNTAIN_THRESHOLD_M 一致, L55)

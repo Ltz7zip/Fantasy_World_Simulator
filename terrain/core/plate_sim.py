@@ -24,7 +24,7 @@ from scipy.ndimage import (gaussian_filter, distance_transform_edt,
                            label as ndi_label, binary_dilation,
                            binary_erosion as ndi_binary_erosion,
                            binary_closing, uniform_filter)
-from tectonics import proximity_fields
+from .tectonics import proximity_fields
 
 # 地球开阔洋 (深度≤-1000m, 占海洋84.6%) 高程分位数 —— ETOPO1(Ice) 2048 实测
 _OC_Q = np.arange(0, 1.0001, 0.025)
@@ -1035,7 +1035,7 @@ def main():
     np.savez_compressed(os.path.join(_dir, "cache", f"plate_sim_v3_T{a.T}_seed{a.seed}.npz"),
                         elev=elev, tect=tect, crust=landm, margin=margin,
                         belt=belt, rift=rift)
-    from terrain_engine import m2v, make_terrain_cmap, render_snow_field
+    from .terrain_engine import m2v, make_terrain_cmap, render_snow_field
     lats = -90.0 + (np.arange(a.T) + 0.5) * (180.0 / a.T)
     fig, ax = plt.subplots(1, 5, figsize=(26, 5.2))
     ax[0].imshow(render_snow_field(m2v(elev), lats, make_terrain_cmap()))

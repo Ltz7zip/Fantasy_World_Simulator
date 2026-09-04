@@ -11,7 +11,7 @@
 """
 import os, sys
 import numpy as np
-from scipy.ndimage import label as ndi_label, binary_dilation, distance_transform_edt
+from scipy.ndimage import label as ndi_label
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from terrain.core.terrain_engine import (continentality_index, ocean_current_effects,
@@ -56,7 +56,6 @@ def label_periodic(mask):
 
 def analyze_biome_shapes(bi, land, name=""):
     """分析单个群系的形状指标."""
-    size = bi.shape[0]
     results = {}
     total_transitions = 0
     # 相邻像素群系变化次数 (水平+垂直, 陆地内)
@@ -79,7 +78,6 @@ def analyze_biome_shapes(bi, land, name=""):
         sizes[0] = 0
         n_real = int((sizes >= 5).sum())
         # 边界像素数 (群系内部边界, 即与不同群系/海洋相邻的像素)
-        edge = m & (binary_dilation(m ^ land) | ~land)  # 与海洋或不同群系相邻
         # 更准确: 与不同群系相邻的像素数
         edge_biome = np.zeros_like(m)
         for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:

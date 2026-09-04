@@ -9,7 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from terrain.core.terrain_engine import (continentality_index, ocean_current_effects,
-    temperature_field, precipitation_field, whittaker_biome, BIOME_COLORS, BIOME_NAMES,
+    temperature_field, precipitation_field, whittaker_biome, BIOME_COLORS,
     smooth_biome_labels)
 from scipy.ndimage import gaussian_filter
 

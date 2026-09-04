@@ -14,8 +14,8 @@ import os
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
-from terrain_engine import m2v, make_terrain_cmap
-from generate_world import render_world
+from .terrain_engine import m2v, make_terrain_cmap
+from .generate_world import render_world
 
 # 兼容移动：本模块现位于 terrain/core/，_dir 指向上级 terrain/ 以命中 terrain/output/
 _file_dir = os.path.dirname(os.path.abspath(__file__))

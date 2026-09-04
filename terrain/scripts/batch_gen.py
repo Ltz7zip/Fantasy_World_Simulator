@@ -2,8 +2,16 @@
 # batch_gen.py —— 批量生成多种子世界地图 (检验用)
 # 运行: python batch_gen.py --seeds 1 2 3 4 5 6 7 8 9 10 --size 2048
 import os
+import sys
 import argparse
-from generate_world import generate_world
+
+# 允许直接 `python terrain/scripts/batch_gen.py` 运行：把项目根加入 sys.path
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(_HERE))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+from terrain.core.generate_world import generate_world
 
 _file_dir = os.path.dirname(os.path.abspath(__file__))
 _dir = (os.path.dirname(_file_dir)

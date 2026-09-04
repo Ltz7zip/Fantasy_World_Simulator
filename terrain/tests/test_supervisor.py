@@ -84,7 +84,7 @@ def test_earth_references_load():
 def test_precip_ref_reuses_terrain_engine():
     """验证 PRECIP_LAT 是 _P_LAT 同对象引用 (复用而非复制)."""
     from terrain.supervisor.references import PRECIP_LAT, PRECIP_MM
-    from terrain_engine import _P_LAT, _P_MM
+    from terrain.core.terrain_engine import _P_LAT, _P_MM
     assert PRECIP_LAT is _P_LAT
     assert PRECIP_MM is _P_MM
 
