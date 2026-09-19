@@ -291,10 +291,12 @@ class MetricAccumulator:
     """
 
     def __init__(self, task: str):
+        """初始化累积器，记录任务名并清空缓存。"""
         self.task = task.lower()
         self.reset()
 
     def reset(self) -> None:
+        """清空已累积的预测、标签与附加数据。"""
         self._preds: list[np.ndarray] = []
         self._targets: list[np.ndarray] = []
         self._extras: dict = {}

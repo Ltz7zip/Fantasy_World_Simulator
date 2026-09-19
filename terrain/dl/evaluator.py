@@ -42,6 +42,7 @@ class Evaluator:
                  sample_dir: Optional[Path] = None,
                  weights: Optional[dict] = None,
                  logger: Optional[TrainLogger] = None):
+        """初始化评估器：保存运行名、参考 DEM 与质量权重，创建样本输出目录。"""
         self.run_name = run_name
         self.ref_dems = ref_dems or []
         self.sample_dir = Path(sample_dir or (LOG_DIR / f"samples_{run_name}"))
@@ -145,6 +146,7 @@ class Evaluator:
     # ---------------- 报告格式化 ----------------
     @staticmethod
     def _format_report(agg: dict) -> str:
+        """把评估结果字典格式化为多行文本报告。"""
         lines = [f"Eval @ epoch={agg['epoch']} step={agg['step']}"]
         for k in ("min", "max", "mean", "std", "land_ratio",
                   "stripe_index", "psd_slope", "mean_slope_deg",

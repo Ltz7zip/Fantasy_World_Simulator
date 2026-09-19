@@ -41,6 +41,7 @@ class PairedDEMDataset(Dataset):
     """
 
     def __init__(self, root: Path = PAIRED_DIR, augment: bool = True):
+        """初始化配对数据集：扫描根目录下全部 .npz 配对样本。"""
         self.root = Path(root)
         self.files = sorted(glob.glob(str(self.root / "*.npz")))
         if not self.files:
@@ -50,9 +51,11 @@ class PairedDEMDataset(Dataset):
         self.augment = augment
 
     def __len__(self) -> int:
+        """返回配对样本数。"""
         return len(self.files)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """加载第 idx 个配对样本，同步增强后返回 (条件, DEM) 张量对。"""
         data = np.load(self.files[idx])
         cond = data["cond"].astype(np.float32)    # (12, H, W)
         dem = data["dem"].astype(np.float32)      # (H, W)

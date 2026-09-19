@@ -60,6 +60,7 @@ def _load_model(task: str, ckpt: str | None = None) -> torch.nn.Module:
     base = state.get("base", 16)
 
     def _make_model():
+        """按任务构造对应的物理网络模型实例。"""
         if task == "river":
             return RiverNet(base=base).to(DEVICE)
         if task == "snowline":
@@ -157,6 +158,7 @@ def predict_river(dem_m: np.ndarray, ckpt: str | None = None,
     model = _load_model("river", ckpt)
 
     def fwd(block: np.ndarray) -> np.ndarray:
+        """单块前向：归一化 DEM 后输入 RiverNet 输出河网概率图。"""
         x = elev_to_norm(block).astype(np.float32)
         x_t = torch.from_numpy(x).unsqueeze(0).unsqueeze(0).to(DEVICE)  # (1,1,H,W)
         prob = model(x_t)   # (1,1,H,W)
@@ -253,6 +255,7 @@ def predict_coast(dem_m: np.ndarray, ckpt: str | None = None,
     model = _load_model("coast", ckpt)
 
     def fwd(block: np.ndarray) -> np.ndarray:
+        """单块前向：归一化 DEM 后输入 CoastNet 输出三类概率图。"""
         x = elev_to_norm(block).astype(np.float32)
         x_t = torch.from_numpy(x).unsqueeze(0).unsqueeze(0).to(DEVICE)
         logits = model(x_t)   # (1,3,H,W)
@@ -329,6 +332,7 @@ def _ensure_core_on_path() -> None:
 # ==================== CLI ====================
 
 def main():
+    """CLI 入口：按任务调用对应推理接口并保存/打印结果。"""
     import argparse
     p = argparse.ArgumentParser(description="阶段 3 物理网络推理")
     p.add_argument("--task", type=str, required=True,

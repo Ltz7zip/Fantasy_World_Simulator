@@ -72,6 +72,7 @@ def check_dependencies(extra: Optional[Sequence[tuple[str, str, Optional[str]]]]
 
 
 def missing_install_hint(missing: Sequence[tuple[str, str, Optional[str]]]) -> str:
+    """根据缺失包列表生成一条 pip 安装命令提示，返回形如 "$ pip install xxx yyy" 的字符串。"""
     names = " ".join(n for n, _, _ in missing)
     venv = Path(sys.executable).parent.parent / "bin" / "pip" if ".venv" in sys.executable else None
     pip_cmd = (f"{venv} install" if venv and venv.exists() else "pip install") + f" {names}"
@@ -82,13 +83,17 @@ def missing_install_hint(missing: Sequence[tuple[str, str, Optional[str]]]) -> s
 # 2. 四个核心动作（CLI / GUI 共用）—— 统一参数模型与返回值
 # ---------------------------------------------------------------------------
 def _ensure_out_dir() -> Path:
+    """确保 terrain/output 目录存在并返回其 Path。"""
     out = _TERRAIN_DIR / "output"
     out.mkdir(parents=True, exist_ok=True)
     return out
 
 
 class GenerateOptions:
-    def __init__(self, seed: int = 1, size: int = 2048, out_dir: Optional[Path] = None):
+    """生成世界的参数容器：seed、size 与输出目录。"""
+
+    def __init__(self, seed: int = 1, size: int = 4096, out_dir: Optional[Path] = None):
+        """``__init__``: 初始化生成参数，out_dir 缺省时落到默认输出目录。"""
         self.seed, self.size, self.out_dir = seed, size, Path(out_dir or _ensure_out_dir())
 
 
@@ -116,11 +121,14 @@ def action_generate(opts: GenerateOptions) -> tuple[bool, str]:
 
 
 class VisualizeOptions:
-    def __init__(self, seed: int = 1, size: int = 2048,
+    """4 面板 PNG 可视化的参数容器：seed、size、探针/多边形/剖面与输出路径。"""
+
+    def __init__(self, seed: int = 1, size: int = 4096,
                  points: Optional[str] = None,
                  polygon: Optional[str] = None,
                  profile: Optional[str] = None,
                  out: Optional[Path] = None):
+        """``__init__``: 初始化可视化参数，out 缺省时生成默认 PNG 路径。"""
         self.seed, self.size = seed, size
         self.points, self.polygon, self.profile = points, polygon, profile
         self.out = Path(out or _ensure_out_dir() / f"geoctx_visual_seed{seed}.png")
@@ -162,7 +170,9 @@ def action_visualize(opts: VisualizeOptions) -> tuple[bool, str]:
 
 
 class HtmlOptions:
-    def __init__(self, seed: int = 1, size: int = 2048,
+    """HTML 交互报告的参数容器：seed、size、叠加元素、图层/查询像素与输出路径。"""
+
+    def __init__(self, seed: int = 1, size: int = 4096,
                  points: Optional[str] = None,
                  polygon: Optional[str] = None,
                  profile: Optional[str] = None,
@@ -170,6 +180,7 @@ class HtmlOptions:
                  query_size: int = 512,
                  no_png: bool = False,
                  html_out: Optional[Path] = None):
+        """``__init__``: 初始化 HTML 报告参数，html_out 缺省时生成默认报告路径。"""
         self.seed, self.size = seed, size
         self.points, self.polygon, self.profile = points, polygon, profile
         self.layer_size, self.query_size = layer_size, query_size
@@ -248,11 +259,12 @@ _MENU_BANNER = r"""
 | |_ / _` | '_ \| '_ \| __/ __|/ _ \| || '_ \ | __| |_ | || __|| __|/ _ \| '__|
 |  _| (_| | | | | | | | |_\__ \  __/| || | | || |_|  _|| || |_ | |_|  __/| |
 |_|  \__,_|_| |_|_| |_|\__|___/\___|___|_| |_| \__|_|  |_| \__| \__|\___||_|
-                    Fantasy World Simulator — v9.0.0 Launcher
+                    Fantasy World Simulator — v9.1.0 Launcher
 """
 
 
 def _read_choice(prompt: str, default: str) -> str:
+    """读取一行用户输入，空输入/EOF 时返回 default。"""
     try:
         raw = input(prompt).strip()
     except EOFError:
@@ -261,17 +273,19 @@ def _read_choice(prompt: str, default: str) -> str:
 
 
 def _cli_read_common(prefix: str = "") -> tuple[int, int]:
+    """交互式读取 seed 与 size，返回 (seed, size)，非法输入退回默认值。"""
     s = _read_choice(f"  {prefix}seed [1]: ", "1")
-    z = _read_choice(f"  {prefix}size (1024/2048/4096) [2048]: ", "2048")
+    z = _read_choice(f"  {prefix}size (1024/2048/4096) [4096]: ", "4096")
     try:
         seed, size = int(s), int(z)
     except ValueError:
-        print("  ⚠️ 非法数字，退回默认 seed=1 size=2048")
-        seed, size = 1, 2048
+        print("  ⚠️ 非法数字，退回默认 seed=1 size=4096")
+        seed, size = 1, 4096
     return seed, size
 
 
 def _cli_read_overlays() -> tuple[Optional[str], Optional[str], Optional[str]]:
+    """交互式读取探针/多边形/剖面叠加元素，返回 (points, polygon, profile)，跳过则为 None。"""
     print("  叠加元素格式（空=跳过）：")
     print("    --points ：lat,lon,name;lat,lon,name   例如 32.0,100.0,长安")
     print("    --polygon：lat,lon;lat,lon;...         多边形纬度/经度点")
@@ -283,6 +297,7 @@ def _cli_read_overlays() -> tuple[Optional[str], Optional[str], Optional[str]]:
 
 
 def run_cli_menu() -> int:
+    """运行交互式命令行主菜单（生成/可视化/HTML/测试/依赖自检），返回退出码。"""
     print(_MENU_BANNER)
     ok, missing = check_dependencies()
     if not ok:
@@ -355,12 +370,16 @@ def try_run_gui() -> bool:
 
     # 4.1 后台线程：把四个 action 移到 Worker 里，避免 UI 卡死
     class _Worker(QThread):
+        """后台工作线程：在子线程中执行 action 函数，通过信号回传日志与结果。"""
+
         log = pyqtSignal(str)
         finished_ok = pyqtSignal(bool, str)
 
         def __init__(self, func, *args, **kwargs):
+            """``__init__``: 保存要执行的函数及其参数。"""
             super().__init__(); self._f, self._a, self._kw = func, args, kwargs
         def run(self):  # noqa: D401
+            """线程入口：调用目标函数并发出 finished_ok 信号，异常也转为失败信号。"""
             try:
                 ok, msg = self._f(*self._a, **self._kw)
                 self.finished_ok.emit(bool(ok), str(msg))
@@ -368,9 +387,12 @@ def try_run_gui() -> bool:
                 self.finished_ok.emit(False, f"未预期异常：{e}\n{traceback.format_exc()}")
 
     class _Main(QMainWindow):
+        """主窗口：五个标签页（生成/PNG/HTML/测试/依赖）+ 日志区。"""
+
         def __init__(self):
+            """``__init__``: 构建窗口标题、各标签页与日志控件。"""
             super().__init__()
-            self.setWindowTitle("Fantasy World Simulator — 启动器 v9.0.0")
+            self.setWindowTitle("Fantasy World Simulator — 启动器 v9.1.0")
             self.resize(980, 660)
             font = QFont(); font.setPointSize(12); self.setFont(font)
 
@@ -389,17 +411,20 @@ def try_run_gui() -> bool:
             v.addWidget(self.log, 1)
 
         # ---- Tab builders ----
-        def _spinsz(self, default=2048):
+        def _spinsz(self, default=4096):
+            """创建步进 256、范围 256~8192 的尺寸输入框并返回。"""
             box = QSpinBox(); box.setRange(256, 8192); box.setValue(default); box.setSingleStep(256)
             return box
         def _spinseed(self, default=1):
+            """创建 32 位整数范围的 seed 输入框并返回。"""
             box = QSpinBox(); box.setRange(0, 2**31 - 1); box.setValue(default)
             return box
 
         def _build_gen_tab(self):
+            """构建“生成世界”标签页表单并返回该控件。"""
             w = QWidget(); form = QFormLayout(w)
             self.gen_seed = self._spinseed(1)
-            self.gen_size = self._spinsz(2048)
+            self.gen_size = self._spinsz(4096)
             self.gen_out = QLineEdit(str(_ensure_out_dir()))
             btn_pick = QPushButton("选择…"); btn_pick.clicked.connect(
                 lambda: self.gen_out.setText(QFileDialog.getExistingDirectory(self, "输出目录", self.gen_out.text()) or self.gen_out.text()))
@@ -414,6 +439,7 @@ def try_run_gui() -> bool:
             return w
 
         def _overlay_group(self, title: str = "叠加元素"):
+            """构建探针/多边形/剖面三个输入框的分组框并返回。"""
             g = QGroupBox(title); f = QFormLayout(g)
             self.vis_points  = QLineEdit(); self.vis_points.setPlaceholderText("32.0,100.0,长安;31.0,110.0,洛阳")
             self.vis_poly    = QLineEdit(); self.vis_poly.setPlaceholderText("30,100;32,102;30,104;28,102")
@@ -424,9 +450,10 @@ def try_run_gui() -> bool:
             return g
 
         def _build_vis_tab(self):
+            """构建“4 面板 PNG”标签页表单并返回该控件。"""
             w = QWidget(); box = QVBoxLayout(w)
             form = QFormLayout(); box.addLayout(form)
-            self.vis_seed = self._spinseed(1); self.vis_size = self._spinsz(2048)
+            self.vis_seed = self._spinseed(1); self.vis_size = self._spinsz(4096)
             self.vis_out = QLineEdit(str(_ensure_out_dir() / "geoctx_visual_seed1.png"))
             btn_pick = QPushButton("另存为…"); btn_pick.clicked.connect(
                 lambda: self.vis_out.setText(QFileDialog.getSaveFileName(
@@ -442,9 +469,10 @@ def try_run_gui() -> bool:
             return w
 
         def _build_html_tab(self):
+            """构建“HTML 报告”标签页表单并返回该控件。"""
             w = QWidget(); box = QVBoxLayout(w)
             form = QFormLayout(); box.addLayout(form)
-            self.html_seed = self._spinseed(1); self.html_size = self._spinsz(2048)
+            self.html_seed = self._spinseed(1); self.html_size = self._spinsz(4096)
             self.html_ls = self._spinsz(1024); self.html_qs = self._spinsz(512)
             self.html_no_png = QCheckBox("不生成 4 面板 PNG（只生成 HTML 会略快）")
             self.html_out = QLineEdit(str(_ensure_out_dir() / "geoctx_report_seed1.html"))
@@ -464,6 +492,7 @@ def try_run_gui() -> bool:
             return w
 
         def _build_test_tab(self):
+            """构建“单元测试”标签页（说明文本 + pytest 参数输入）并返回该控件。"""
             w = QWidget(); v = QVBoxLayout(w)
             v.addWidget(QLabel(textwrap.dedent("""\
                 <p>运行 <code>terrain/tests</code> 下的 pytest 用例（目前 33 项，覆盖：
@@ -478,6 +507,7 @@ def try_run_gui() -> bool:
             return w
 
         def _build_deps_tab(self):
+            """构建“依赖自检”标签页并立即刷新一次依赖状态。"""
             w = QWidget(); v = QVBoxLayout(w)
             self.deps_text = QTextEdit(readOnly=True)
             btn = QPushButton("🔎 重新检查依赖")
@@ -488,12 +518,14 @@ def try_run_gui() -> bool:
 
         # ---- 辅助：写日志、开启工作线程 ----
         def _append(self, s: str):
+            """把字符串 s 追加到日志区并滚动到底部。"""
             self.log.moveCursor(1)  # QTextCursor.End = 1
             # 用更简单的方式：setPlainText 累加
             self.log.setPlainText(self.log.toPlainText() + ("\n" if self.log.toPlainText() else "") + s)
             self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
 
         def _refresh_deps(self):
+            """重新检查基础/GUI 依赖并显示在依赖自检文本框中。"""
             lines = ["--- 基础依赖 (numpy/matplotlib/scipy/torch/pytest/Pillow) ---"]
             ok, missing = check_dependencies()
             lines.append("✅ 全部就位" if ok else f"❌ 缺失：{' '.join(n for n,_,_ in missing)}\n   安装：{missing_install_hint(missing)}")
@@ -503,11 +535,13 @@ def try_run_gui() -> bool:
             self.deps_text.setPlainText("\n".join(lines))
 
         def _set_busy(self, busy: bool):
+            """设置忙状态：忙时禁用全部标签页，防止并发操作。"""
             for i in range(self.tabs.count()):
                 self.tabs.widget(i).setEnabled(not busy)
             self.tabs.setEnabled(not busy)
 
         def _start(self, which: str):
+            """按 which 组装对应 Options 并启动后台 Worker 执行。"""
             self._set_busy(True)
             self._append(f"▶ [{which.upper()}] 开始执行…")
             if which == "gen":
@@ -541,6 +575,7 @@ def try_run_gui() -> bool:
 
             worker.log.connect(self._append)
             def _done(ok, msg):
+                """Worker 完成回调：写日志、解除忙状态并弹窗提示结果。"""
                 self._append(msg); self._set_busy(False)
                 QMessageBox.information(self, "完成" if ok else "失败", msg)
             worker.finished_ok.connect(_done)
@@ -556,6 +591,7 @@ def try_run_gui() -> bool:
 # 5. CLI 子命令直跑（用于 CI / 脚本）
 # ---------------------------------------------------------------------------
 def _build_argparse() -> argparse.ArgumentParser:
+    """构建 CLI 参数解析器（含 generate/visualize/html/pytest 子命令），返回 ArgumentParser。"""
     p = argparse.ArgumentParser(
         prog="main.py",
         description="Fantasy World Simulator — 项目启动入口",
@@ -564,7 +600,7 @@ def _build_argparse() -> argparse.ArgumentParser:
             示例：
               python main.py                           → GUI（无 PyQt5 则降级 CLI 菜单）
               python main.py --cli                     → CLI 菜单
-              python main.py generate -s 42 --size 2048
+              python main.py generate -s 42 --size 4096
               python main.py visualize -s 42 --points "32,100,长安;31,110,洛阳"
               python main.py html -s 42 --profile "35,90;25,120" --no-png
               python main.py pytest -xvs -k cache
@@ -574,19 +610,20 @@ def _build_argparse() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="cmd", metavar="<cmd>")
 
     def _add_sp(parser, name, h):
+        """在 parser 下注册名为 name 的子命令解析器并返回。"""
         sp = parser.add_parser(name, help=h); sp.set_defaults(cmd=name)
         return sp
 
     # generate
     sp = _add_sp(sub, "generate", "生成世界 DEM + 预览骨架 PNG")
     sp.add_argument("-s", "--seed", type=int, default=1)
-    sp.add_argument("--size", type=int, default=2048, choices=[256, 512, 1024, 2048, 4096])
+    sp.add_argument("--size", type=int, default=4096, choices=[256, 512, 1024, 2048, 4096])
     sp.add_argument("-o", "--out-dir", type=str, default=None, help="输出目录（默认 terrain/output/）")
 
     # visualize
     sp = _add_sp(sub, "visualize", "4 面板 PNG 可视化")
     sp.add_argument("-s", "--seed", type=int, default=1)
-    sp.add_argument("--size", type=int, default=2048)
+    sp.add_argument("--size", type=int, default=4096)
     sp.add_argument("--points", type=str, default=None)
     sp.add_argument("--polygon", type=str, default=None)
     sp.add_argument("--profile", type=str, default=None)
@@ -595,7 +632,7 @@ def _build_argparse() -> argparse.ArgumentParser:
     # html
     sp = _add_sp(sub, "html", "导出 HTML 交互报告（可选连带 PNG）")
     sp.add_argument("-s", "--seed", type=int, default=1)
-    sp.add_argument("--size", type=int, default=2048)
+    sp.add_argument("--size", type=int, default=4096)
     sp.add_argument("--points", type=str, default=None)
     sp.add_argument("--polygon", type=str, default=None)
     sp.add_argument("--profile", type=str, default=None)
@@ -612,6 +649,7 @@ def _build_argparse() -> argparse.ArgumentParser:
 
 
 def run_subcommand(cmd: str, args: argparse.Namespace) -> int:
+    """按子命令名分发到对应 action，返回进程退出码（0 成功 / 2 失败 / 3 pytest 失败 / 1 未知命令）。"""
     if cmd == "generate":
         ok, msg = action_generate(GenerateOptions(args.seed, args.size, args.out_dir))
         print(msg); return 0 if ok else 2
@@ -637,6 +675,7 @@ def run_subcommand(cmd: str, args: argparse.Namespace) -> int:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    """程序入口：有子命令则直跑，否则按 --cli/依赖情况选择 GUI 或 CLI 菜单，返回退出码。"""
     parser = _build_argparse()
     args = parser.parse_args(argv)
     if args.cmd:

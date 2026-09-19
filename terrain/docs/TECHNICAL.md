@@ -1,6 +1,10 @@
-# 幻想世界生成器 v9.0 —— 技术文档
+# 幻想世界生成器 v12 —— 技术文档
 
-> 使用说明见 [README.md](README.md)。本文档面向算法原理与调参。
+> 使用说明见 [README.md](../../README.md)。本文档面向算法原理与调参。
+>
+> **v12**：删除 `terrain/` 根目录兼容薄封装与 60+ 一次性诊断脚本；文档合并精简。
+> **v11**：OpenMP 并行（median 33.7x / scan_ew 9.1x）+ `smooth_small_patches` 碎片清理 C++ 化（render_world 28.52s → 24.99s）。
+> **v10**：C++ 原生加速 `terrain/native/`（pybind11，15 内核与 Numba 逐位一致，全流程 146.3s → 139.9s）。
 
 ## 1. 管线总览
 
@@ -24,12 +28,15 @@ v8.3 河流水系系统 (骨架提取 + 沿程单调修复 / Hack 定律蜿蜒 /
 v9.0 监督反思 (supervisor 审计 → 反思 → 学习日志 → 自动注入 overrides)
 ```
 
-运行（项目根目录）: `python terrain/generate_world.py --seed 0 --size 2048`
-板块模拟单独调试: `python terrain/plate_sim.py --seed 7 --T 512`
-重训 GAN: `python terrain/terrain_engine.py`（需 data/ 中的 ETOPO1）
-重绘（不重算 DEM）: `python terrain/rerender.py`
+运行（项目根目录）: `python -m terrain.core.generate_world --seed 0 --size 2048`
+板块模拟单独调试: `python -m terrain.core.plate_sim --seed 7 --T 512`
+重训 GAN: `python -m terrain.core.terrain_engine`（需 data/ 中的 ETOPO1）
+重绘（不重算 DEM）: `python -m terrain.core.rerender`
 
 > 所有路径基于脚本所在目录（terrain/），从任意工作目录调用均有效。
+> v12 起已删除 `terrain/` 根目录的兼容薄封装；且 `terrain/core/*.py` 使用包内相对导入，
+> **必须以 `python -m terrain.core.xxx` 方式运行**（不能直接 `python terrain/core/xxx.py`）。
+> `terrain/scripts/*.py` 自带 sys.path 注入，可直接 `python terrain/scripts/xxx.py`。
 
 ***
 
@@ -193,12 +200,12 @@ T = 27 − 0.42·|lat| − 6.5·(elev/1000) − 22·clip((|lat|−55)/35, 0, 1)�
 
 **v7.1+ 温度改进**（`continentality_index` 大陆度指数 + 极地过渡软化 + 副热带高压绝热增温）：
 
-| 改进项 | 机制 | 解决的问题 |
-| --- | --- | --- |
-| 大陆度指数 CI | `CI = (1−exp(−d_sea/1800km)) × (0.55+0.45·clip((|lat|−15)/75,0,1))` | 深内陆冬季更冷（西伯利亚型），修正纯纬向温度 |
-| 极地过渡软化 | `polar = clip((|lat|−58)/32, 0, 1)^1.5 × 22`（v7.1 缓和版） | 66.5° 一刀切 → 66–72° 苔原低地保留（泰加林生存窗口） |
-| 副热带高压 | 20–32°（25° 峰 +2.3°C）绝热下沉增温 | 副热带荒漠带温度对齐地球 |
-| 深水汽输送 | v7.1 尾项：距海 >600km 的内陆降水尾效衰减 | 大陆腹地干旱梯度更自然 |
+| 改进项      | 机制                                                 | 解决的问题        | <br />                              | <br />                             |
+| -------- | -------------------------------------------------- | ------------ | :---------------------------------- | :--------------------------------- |
+| 大陆度指数 CI | \`CI = (1−exp(−d\_sea/1800km)) × (0.55+0.45·clip(( | lat          | −15)/75,0,1))\`                     | 深内陆冬季更冷（西伯利亚型），修正纯纬向温度             |
+| 极地过渡软化   | \`polar = clip((                                   | lat          | −58)/32, 0, 1)^1.5 × 22\`（v7.1 缓和版） | 66.5° 一刀切 → 66–72° 苔原低地保留（泰加林生存窗口） |
+| 副热带高压    | 20–32°（25° 峰 +2.3°C）绝热下沉增温                         | 副热带荒漠带温度对齐地球 | <br />                              | <br />                             |
+| 深水汽输送    | v7.1 尾项：距海 >600km 的内陆降水尾效衰减                        | 大陆腹地干旱梯度更自然  | <br />                              | <br />                             |
 
 **v7.3/v7.4 极地校准**（P-POLAR v7/v8）：58°+ 大陆冬天冷化豁免 40%→60%，
 解决用户报告的"泰加林缺失，60°N 几乎全是苔原"问题。
@@ -217,7 +224,7 @@ T = 27 − 0.42·|lat| − 6.5·(elev/1000) − 22·clip((|lat|−55)/35, 0, 1)�
 3. v7.3 分纬度带 CI 权重分化（解决"右侧大陆纵贯荒漠"异常）
 4. v7.4 赤道 |lat|<15° CI 惩罚放宽 0.80→0.50（地球 ITCZ 对流雨局地性）
 5. 山脉破碎扰动（±12% 相对，仅 800m+ 山带激活）
-6. v7.2 气候计算用 σ=2.2 高斯平滑地形，消除 ridged_fbm 脊状高频与纬向 T 的拍频伪影
+6. v7.2 气候计算用 σ=2.2 高斯平滑地形，消除 ridged\_fbm 脊状高频与纬向 T 的拍频伪影
 
 ### 洋流/季风异常场（v7.0-M4, `ocean_current_effects`）
 
@@ -257,13 +264,13 @@ T = 27 − 0.42·|lat| − 6.5·(elev/1000) − 22·clip((|lat|−55)/35, 0, 1)�
 在 v6.6/v7.0 干流雕刻基础上，v8.3 对河流水系做了系统性升级，解决了
 "河流像直线"、"流量沿途不单调"、"颜色生硬"三大问题。
 
-| 子系统 | 关键机制 | 解决的问题 |
-| --- | --- | --- |
-| **骨架提取 + 单调修复** | D8 流累积 → 阈值化 → 细化骨架 → 4 pass 广搜修复沿程流量单调（`R=1→2→3` 邻居） | `log(acc)` 单调比 0.62 → ≥0.92，支流不出现逆流 |
-| **Hack 定律蜿蜒** | 摆幅 `amp ∝ A^0.50`（A=汇水面积），5 轮转弯钳制，Sinuosity 闭环 | 短骨架(L3/L4 源头支沟)不大弯；主流 2.63× / 源头 0.25× 摆幅梯度 |
-| **Hack 幂律宽/深** | 河宽 `W ∝ A^0.5`，深槽偏摆 + 中心 V 深切 + 非对称深槽 | 大河宽深、小河窄浅，符合 Hack 定律 |
-| **牛轭湖截断** | 高弯曲段河道裁弯取直，旧河道残留为牛轭湖（淡染） | 自然河曲地貌 |
-| **连续蓝度渲染** | 距离场羽化岸线（2\~3px 真羽化，消除像素锯齿）+ 交汇色溢 + 牛轭湖淡染 | v8.2 视觉硬边界 / 单调三档 / 交汇无色溢 |
+| 子系统             | 关键机制                                                  | 解决的问题                                       |
+| --------------- | ----------------------------------------------------- | ------------------------------------------- |
+| **骨架提取 + 单调修复** | D8 流累积 → 阈值化 → 细化骨架 → 4 pass 广搜修复沿程流量单调（`R=1→2→3` 邻居） | `log(acc)` 单调比 0.62 → ≥0.92，支流不出现逆流         |
+| **Hack 定律蜿蜒**   | 摆幅 `amp ∝ A^0.50`（A=汇水面积），5 轮转弯钳制，Sinuosity 闭环        | 短骨架(L3/L4 源头支沟)不大弯；主流 2.63× / 源头 0.25× 摆幅梯度 |
+| **Hack 幂律宽/深**  | 河宽 `W ∝ A^0.5`，深槽偏摆 + 中心 V 深切 + 非对称深槽                 | 大河宽深、小河窄浅，符合 Hack 定律                        |
+| **牛轭湖截断**       | 高弯曲段河道裁弯取直，旧河道残留为牛轭湖（淡染）                              | 自然河曲地貌                                      |
+| **连续蓝度渲染**      | 距离场羽化岸线（2\~3px 真羽化，消除像素锯齿）+ 交汇色溢 + 牛轭湖淡染              | v8.2 视觉硬边界 / 单调三档 / 交汇无色溢                   |
 
 渲染调用链：`climate_flow_accumulation` → `extract_river_skeleton` →
 `carve_rivers`（地形下切）→ `paint_rivers_rgb`（RGB 着色）。
@@ -278,37 +285,29 @@ v7.0 的 66.5° 一刀切全冰 → v7.1 改为 66.5°→72° 过渡带，仅
 
 ## 8. 文件清单
 
-| 文件                                      | 用途                                                                                                                  |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| `terrain/plate_sim.py`                  | **（兼容薄封装）** 转发到 `terrain/core/plate_sim.py`，勿直接编辑                                                                   |
-| `terrain/tectonics.py`                  | **（兼容薄封装）** 转发到 `terrain/core/tectonics.py`，勿直接编辑                                                                   |
-| `terrain/terrain_engine.py`             | **（兼容薄封装）** 转发到 `terrain/core/terrain_engine.py`，勿直接编辑                                                              |
-| `terrain/generate_world.py`             | **（兼容薄封装）** 转发到 `terrain/core/generate_world.py`，勿直接编辑                                                              |
-| `terrain/geo_context.py`                | **（兼容薄封装）** 转发到 `terrain/core/geo_context.py`，勿直接编辑                                                                 |
-| `terrain/visualize_context.py`          | **（兼容薄封装）** 转发到 `terrain/core/visualize_context.py`，勿直接编辑                                                           |
-| `terrain/rerender.py`                   | **（兼容薄封装）** 转发到 `terrain/core/rerender.py`，勿直接编辑                                                                    |
-| `terrain/batch_gen.py`                  | **（兼容薄封装）** 转发到 `terrain/scripts/batch_gen.py`，勿直接编辑                                                                |
-| `terrain/analyze_worlds.py`             | **（兼容薄封装）** 转发到 `terrain/scripts/analyze_worlds.py`，勿直接编辑                                                           |
-| `terrain/make_montage.py`               | **（兼容薄封装）** 转发到 `terrain/scripts/make_montage.py`，勿直接编辑                                                             |
-| **`terrain/core/plate_sim.py`**         | 【真实实现】板块演化模拟 **v3.0 超大陆旋回**（缓存 `cache/plate_sim_v3_T512_seed*.npz`）                                                 |
-| **`terrain/core/tectonics.py`**         | 【真实实现】Bird 2003 真实边界 → 构造条件场（训练用，缓存 `cache/tect_cache_*.npz`）                                                       |
-| **`terrain/core/terrain_engine.py`**    | 【真实实现】归一化/气候/侵蚀/后处理/网络/训练 + v6.6 修复层 + v7.0 洋流/季风/冰盖                                                                |
-| **`terrain/core/generate_world.py`**    | 【真实实现】世界生成主入口（管线编排 + 渲染 + 产物落盘）                                                                                     |
-| **`terrain/core/geo_context.py`**       | 【真实实现 · 新增 v7.0】`WorldGeoContext` 单例 —— DEM 懒加载 / 坐标转换 / 双线性查询 / KPI 统计 / 多边形裁切                                     |
-| **`terrain/core/visualize_context.py`** | 【真实实现 · 新增 v7.0】4 面板 PNG + 单文件离线交互 HTML 报告（探针点/多边形/剖面联动）                                                            |
-| **`terrain/core/rerender.py`**          | 【真实实现】仅重渲染（不动 DEM）                                                                                                  |
-| **`terrain/scripts/batch_gen.py`**      | 【真实实现】批量生成多种子地图（检验用，进程池并行）                                                                                          |
-| **`terrain/scripts/analyze_worlds.py`** | 【真实实现】七大地理维度指标 vs 真实地球同口径分析（输出 analysis\_results.json）                                                              |
-| **`terrain/scripts/make_montage.py`**   | 【真实实现】真实地球(同风格渲染)+N 种子对比拼图                                                                                          |
-| `tests/test_visualize_context.py`       | pytest 33 项：参数解析 / 单例缓存 / figure 冒烟 / latlon 往返 / CLI 主流程 / Protocol 合规                                             |
-| `tests/test_supervisor.py`              | pytest 32 项：metrics 计算 / reflector 反思 / learning_log 读写 / overrides 注入                                                       |
-| `tests/test_dl_phase1..5.py`            | pytest 447 项：DL 五阶段（VAE/DDPM/LDM/物理网络/大规模推理/管线）的形状 / 数值 / 接口测试                                                |
-| `terrain/dl/`                           | **【v9.0 新增】深度学习模块**：5 阶段（DDPM → LDM → 物理监督 → 大规模推理 → 端到端管线 + ESRGAN 超分），详见 §21                              |
-| `terrain/supervisor/`                   | **【v9.0 新增】监督反思模块**：审计 metrics / reflector 反思 / learning_log 学习日志 / overrides 自动注入，详见 §22                          |
-| `data/`                                 | ETOPO1 全球 DEM、PB2002 板块边界（重训数据源，生成世界不需要）                                                                            |
-| `checkpoints/`                          | GAN 权重 `best_terrain_gan_v5.pth`（12 通道条件 GAN，UNet in\_ch=12, base=32）                                               |
-| `cache/`                                | 板块演化与构造场缓存（100% 可再生，删了只是变慢）                                                                                         |
-| `output/`                               | `world_dem.npy` / `world_map.png` / `world_skeleton.png` / `geoctx_visual_seed{}.png` / `geoctx_report_seed{}.html` |
+| 文件                                      | 用途                                                                                                                          |
+| --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| **`terrain/core/plate_sim.py`**         | 【真实实现】板块演化模拟 **v3.0 超大陆旋回**（缓存 `cache/plate_sim_v3_T512_seed*.npz`）                                                         |
+| **`terrain/core/tectonics.py`**         | 【真实实现】Bird 2003 真实边界 → 构造条件场（训练用，缓存 `cache/tect_cache_*.npz`）                                                               |
+| **`terrain/core/terrain_engine.py`**    | 【真实实现】归一化/气候/侵蚀/后处理/网络/训练 + v6.6 修复层 + v7.0 洋流/季风/冰盖                                                                        |
+| **`terrain/core/generate_world.py`**    | 【真实实现】世界生成主入口（管线编排 + 渲染 + 产物落盘）                                                                                             |
+| **`terrain/core/geo_context.py`**       | 【真实实现 · 新增 v7.0】`WorldGeoContext` 单例 —— DEM 懒加载 / 坐标转换 / 双线性查询 / KPI 统计 / 多边形裁切                                             |
+| **`terrain/core/visualize_context.py`** | 【真实实现 · 新增 v7.0】4 面板 PNG + 单文件离线交互 HTML 报告（探针点/多边形/剖面联动）                                                                    |
+| **`terrain/core/rerender.py`**          | 【真实实现】仅重渲染（不动 DEM）                                                                                                          |
+| **`terrain/scripts/batch_gen.py`**      | 【真实实现】批量生成多种子地图（检验用，进程池并行）                                                                                                  |
+| **`terrain/scripts/analyze_worlds.py`** | 【真实实现】七大地理维度指标 vs 真实地球同口径分析（输出 analysis\_results.json）                                                                      |
+| **`terrain/scripts/make_montage.py`**   | 【真实实现】真实地球(同风格渲染)+N 种子对比拼图                                                                                                  |
+| `terrain/modules/`                      | **【v9.0 模块化引擎】** `base.py`（WorldContext）/ `engine.py`（WorldEngine 拓扑编排）/ 地形 / 水系 / 气温 / 气候 4 模块，详见 modules/ARCHITECTURE.md  |
+| `terrain/native/`                       | **【v10 新增 C++ 原生加速】** pybind11 扩展 `fws_native`（15 内核 + OpenMP 并行），详见 §24                                              |
+| `tests/test_visualize_context.py`       | pytest 33 项：参数解析 / 单例缓存 / figure 冒烟 / latlon 往返 / CLI 主流程 / Protocol 合规                                                     |
+| `tests/test_supervisor.py`              | pytest 32 项：metrics 计算 / reflector 反思 / learning\_log 读写 / overrides 注入                                                     |
+| `tests/test_dl_phase1..5.py`            | pytest 447 项：DL 五阶段（VAE/DDPM/LDM/物理网络/大规模推理/管线）的形状 / 数值 / 接口测试                                                              |
+| `terrain/dl/`                           | **【v9.0 新增 / v9.1 SRNet 训练完成】深度学习模块**：5 阶段（DDPM → LDM → 物理监督 → 大规模推理 → 端到端管线 + ESRGAN 超分），详见 §21                            |
+| `terrain/supervisor/`                   | **【v9.0 新增】监督反思模块**：审计 metrics / reflector 反思 / learning\_log 学习日志 / overrides 自动注入，详见 §22                                  |
+| `data/`                                 | ETOPO1 全球 DEM、PB2002 板块边界（重训数据源，生成世界不需要）                                                                                    |
+| `checkpoints/`                          | GAN 权重 `best_terrain_gan_v5.pth`（12 通道条件 GAN）/ LDM 权重 `ldm_phase2.pt`+`vae_phase1.pt` / **(v9.1) SRNet 权重** **`sr_net.pt`** |
+| `cache/`                                | 板块演化与构造场缓存（100% 可再生，删了只是变慢）                                                                                                 |
+| `output/`                               | `world_dem.npy` / `world_map.png` / `world_skeleton.png` / `geoctx_visual_seed{}.png` / `geoctx_report_seed{}.html`         |
 
 ***
 
@@ -876,9 +875,9 @@ actual_path, ctx = build_html_report(
 
 ## 19. CLI 参数与配置汇总（全部脚本 × 默认值 × 说明）
 
-> 兼容薄封装：`python terrain/xxx.py` 仍可使用（re-export 一跳 + 自动注入路径）；推荐直接跑 terrain/core/ 或 terrain/scripts/ 下的真实脚本便于调试堆栈。
+> v12 起已删除 `terrain/` 根目录兼容薄封装；`terrain/core/*.py` 必须以 `python -m terrain.core.xxx` 运行，`terrain/scripts/*.py` 可直接运行。
 
-### 19.1 `python terrain/core/generate_world.py` 主入口
+### 19.1 `python -m terrain.core.generate_world` 主入口
 
 | 参数                       | 默认                                    | 说明                                    |
 | ------------------------ | ------------------------------------- | ------------------------------------- |
@@ -889,7 +888,7 @@ actual_path, ctx = build_html_report(
 | `--skip-gan`             | `False`                               | 只生成骨架（调试板块/造山带，跳过 GAN 的 40 秒 \~ 2 分钟） |
 | `--no-render`            | `False`                               | 只算 DEM 不渲染 world\_map.png（批量生成时提速）    |
 
-### 19.2 `python terrain/core/visualize_context.py` 可视化 + HTML 报告
+### 19.2 `python -m terrain.core.visualize_context` 可视化 + HTML 报告
 
 | 参数                      | 默认                                            | 说明                                                                        |
 | ----------------------- | --------------------------------------------- | ------------------------------------------------------------------------- |
@@ -907,7 +906,7 @@ actual_path, ctx = build_html_report(
 | **`--html-query-size`** | `512`                                         | HTML JS 悬停查询网格分辨率（越大越精确；建议 512/768/1024）                                  |
 | **`--no-png`**          | `False`                                       | 只出 HTML 跳过 PNG（纯 HTML 场景提速 60%+）                                          |
 
-### 19.3 `python terrain/core/plate_sim.py` 板块演化（单独调试）
+### 19.3 `python -m terrain.core.plate_sim` 板块演化（单独调试）
 
 | 参数              | 默认                                         | 说明                                                     |
 | --------------- | ------------------------------------------ | ------------------------------------------------------ |
@@ -922,11 +921,11 @@ actual_path, ctx = build_html_report(
 
 | 脚本                                  | 常用参数                                                                          | 说明                                               |
 | ----------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------ |
-| `terrain/core/rerender.py`          | `--dem` / `--size` / `--out`                                                  | 仅重渲染 world\_map.png（不重算 DEM；调渲染参数时反复用）           |
+| `terrain/core/rerender.py`          | `--dem` / `--size` / `--out`                                                  | 仅重渲染 world\_map.png（不重算 DEM；调渲染参数时反复用）⚠ 运行：`python -m terrain.core.rerender` |
 | `terrain/scripts/batch_gen.py`      | `--seeds 1 2 3 4 5 ...` / `--size 2048`                                       | 批量生成多种子；内部进程池并行，适合回归测试基线                         |
 | `terrain/scripts/analyze_worlds.py` | `--glob "terrain/output/world_dem_seed*.npy"` / `--out analysis_results.json` | 七大维度 45+ 项地理指标 × 与 ETOPO1 同口径对比                  |
 | `terrain/scripts/make_montage.py`   | `--seeds 1 2 3 4` / `--cols 3`                                                | 真实地球 (ETOPO1 同风格渲染) + N 种子并排对比拼图                 |
-| `terrain/core/terrain_engine.py` 训练 | `--data ./data/ETOPO1...grd` / `--epochs 120` / `--batch 16`                  | 删除 checkpoint 后自动进入训练模式；需要 data/ ETOPO1 + PB2002 |
+| `terrain/core/terrain_engine.py` 训练 | `--data ./data/ETOPO1...grd` / `--epochs 120` / `--batch 16`                  | 删除 checkpoint 后自动进入训练模式；需要 data/ ETOPO1 + PB2002 ⚠ 运行：`python -m terrain.core.terrain_engine` |
 
 ### 19.5 环境变量（可选 override，一般不用）
 
@@ -978,17 +977,11 @@ actual_path, ctx = build_html_report(
 
 - `terrain/supervisor/reflector.py`: `LAT_BANDS`
 
-- `terrain/scripts/diagnose_issues.py`: 顶层 `ndi_label`(移至函数内局部导入，消除 F811 重定义)、`elev_T`
-
-- `terrain/scripts/biome_compare_new.py`: `ndi_zoom`、`Aw`
-
-- `terrain/scripts/biome_shape_analysis.py`: `distance_transform_edt`、`binary_dilation`、`size`、`edge`
-
-- `terrain/scripts/render_biome_only.py`: `BIOME_NAMES`
-
 - `terrain/scripts/analyze_worlds.py`: `Aw`
 
 - `main.py`: `os`、`Qt`、`QComboBox`
+
+> **v12 注**：原此处列出的 `diagnose_issues.py` / `biome_compare_new.py` / `biome_shape_analysis.py` / `render_biome_only.py` 等一次性诊断脚本已随 v12 精简删除，清理记录不再适用。
 
 ### 20.4 评估后接受的低风险项（未修改）
 
@@ -1032,30 +1025,32 @@ bandit 验证：`terrain/core/tectonics.py terrain/core/terrain_engine.py terrai
 
 ***
 
-## 21. 深度学习模块 (terrain/dl/, v9.0 新增)
+## 21. 深度学习模块 (terrain/dl/, v9.0 新增 / v9.1 SRNet 训练完成)
 
 > 与 `terrain/core/` 的 **12 通道条件 GAN（UNet）** 是两条独立路线：core/ 的 GAN 是项目主生成器（内置权重、开箱即用）；`terrain/dl/` 是新一代扩散模型路线（DDPM → LDM → 物理监督 → 大规模推理 → 端到端管线），用于研究与下一代生成器替换。
+>
+> **v9.1 更新**：SRNet（ESRGAN）超分网络正式训练完成（300 epoch / 60 mosaics），`DiffusionPipeline` 已集成并修复 SRNet 权重加载逻辑。
 
 ### 21.1 五阶段路线图
 
-| 阶段 | 主题 | 关键模块 | 说明 |
-| --- | --- | --- | --- |
-| **1** | 数据 + 无监督 DDPM | `dataset.py`, `vae.py`, `unet.py`, `diffusion.py`, `train.py`, `metrics.py`, `evaluator.py` | DEM 切片数据集 + VAE（256²×1 ↔ 32²×4 潜空间）+ DDPM 去噪 U-Net + 余弦调度 + EMA + 周期采样评估 |
-| **2** | 半监督条件扩散 LDM | `paired_dataset.py`, `train_ldm.py`, `ddim.py`, `infer_ldm.py` | 少量配对样本训练条件 LDM，DDIM 采样加速，分块推理 |
-| **3** | 物理一致性监督 | `physics_nets.py`, `physics_dataset.py`, `physics_metrics.py`, `train_physics.py`, `infer_physics.py` | RiverNet（河网）/ SnowlineNet（雪线）/ CoastNet（海岸线）三个物理监督子网 |
-| **4** | 大规模推理优化 | `large_infer.py` | MemoryManager（显存管理）+ TileScheduler（瓦片调度）+ PipelineInference（流水线） |
-| **5** | 端到端集成管线 | `sr_net.py`, `multicond.py`, `pipeline.py` | ESRGAN 超分（4×）+ 多模态条件编码器（草图/高度/群落）+ `DiffusionPipeline` 统一 API |
+| 阶段    | 主题            | 关键模块                                                                                                  | 说明                                                                                                       |
+| ----- | ------------- | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| **1** | 数据 + 无监督 DDPM | `dataset.py`, `vae.py`, `unet.py`, `diffusion.py`, `train.py`, `metrics.py`, `evaluator.py`           | DEM 切片数据集 + VAE（256²×1 ↔ 32²×4 潜空间）+ DDPM 去噪 U-Net + 余弦调度 + EMA + 周期采样评估                                 |
+| **2** | 半监督条件扩散 LDM   | `paired_dataset.py`, `train_ldm.py`, `ddim.py`, `infer_ldm.py`                                        | 少量配对样本训练条件 LDM，DDIM 采样加速，分块推理                                                                            |
+| **3** | 物理一致性监督       | `physics_nets.py`, `physics_dataset.py`, `physics_metrics.py`, `train_physics.py`, `infer_physics.py` | RiverNet（河网）/ SnowlineNet（雪线）/ CoastNet（海岸线）三个物理监督子网                                                     |
+| **4** | 大规模推理优化       | `large_infer.py`                                                                                      | MemoryManager（显存管理）+ TileScheduler（瓦片调度）+ PipelineInference（流水线）                                         |
+| **5** | 端到端集成管线       | `sr_net.py`, `multicond.py`, `pipeline.py`                                                            | ESRGAN 超分（4×，**v9.1 已训练完成**：base=32, n\_rrdb=3, CCA 注意力）+ 多模态条件编码器（草图/高度/群落）+ `DiffusionPipeline` 统一 API |
 
 ### 21.2 核心配置 (config.py)
 
-| 项 | 值 | 说明 |
-| --- | --- | --- |
-| `TILE_SIZE` | 256 | 切片尺寸 |
-| `IN_CHANNELS` | 1 | 阶段 1 单通道高程 |
-| `LATENT_CHANNELS` / `LATENT_SIZE` | 4 / 32 | VAE 潜空间（256//8） |
-| `ELEV_MIN` / `ELEV_MAX` | −12000 / 9000 m | 归一化到 [−1, 1] |
-| `BATCH_SIZE` / `LR` / `WEIGHT_DECAY` | 8 / 1e-4 / 1e-2 | 训练超参 |
-| `DEVICE` | MPS > CUDA > CPU | 与 `terrain_engine.py` 一致 |
+| 项                                    | 值                | 说明                       |
+| ------------------------------------ | ---------------- | ------------------------ |
+| `TILE_SIZE`                          | 256              | 切片尺寸                     |
+| `IN_CHANNELS`                        | 1                | 阶段 1 单通道高程               |
+| `LATENT_CHANNELS` / `LATENT_SIZE`    | 4 / 32           | VAE 潜空间（256//8）          |
+| `ELEV_MIN` / `ELEV_MAX`              | −12000 / 9000 m  | 归一化到 \[−1, 1]            |
+| `BATCH_SIZE` / `LR` / `WEIGHT_DECAY` | 8 / 1e-4 / 1e-2  | 训练超参                     |
+| `DEVICE`                             | MPS > CUDA > CPU | 与 `terrain_engine.py` 一致 |
 
 ### 21.3 端到端管线 (pipeline.py)
 
@@ -1072,6 +1067,8 @@ LDM 生成 (条件扩散 → 低分辨率 DEM)
 ```
 
 **关键特性**：`PipelineConfig` 集中管理参数（支持 YAML）、条件缓存（同 seed 复用板块模拟）、阶段控制（选择性跳过/重试）、错误降级（SR/物理失败时降级到原始 DEM）、进度回调。
+
+> **v9.1 修复**：`sr_model` property 现在使用与训练一致的结构参数（`scale=4, use_attention=True, base=32, n_rrdb=3`）并自动加载 `checkpoints/sr_net.pt` 权重；`_run_sr` 通过 `self.sr_model` property 触发权重加载。
 
 ```python
 from terrain.dl.pipeline import DiffusionPipeline, PipelineConfig
@@ -1092,11 +1089,17 @@ python -m terrain.dl.train_ldm
 # 阶段 3：物理监督网络训练
 python -m terrain.dl.train_physics
 
+# (v9.1) 阶段 5A：SRNet 超分网络训练（300 epoch / 约 67min / MPS）
+python terrain/scripts/_run_srnet_train.py
+
 # LDM 推理
 python -m terrain.dl.infer_ldm --seed 42 --size 2048
 
 # 大规模推理
 python -m terrain.dl.large_infer
+
+# (v9.1) 端到端管线运行（LDM 生成 → SRNet 4× 超分）
+python terrain/scripts/_run_pipeline_sr.py
 ```
 
 ***
@@ -1149,10 +1152,12 @@ overrides = get_overrides()   # Dict[str, float]，文件不存在返回 {}
 `reflector.py` 按规则生成反思，低风险项（如海平面微调、雪线偏移）自动写入
 `overrides.json`，下次生成时注入；高风险项仅记录不自动修改。
 
-### 22.4 学习日志 (learning_log.py)
+### 22.4 学习日志 (learning\_log.py)
 
 - `log.jsonl`：每行一次审计，含 metrics + reflections + overrides + version
+
 - `summary.md`：聚合统计，自动重建
+
 - 查询 API：`query_recent(n)` / `query_by_metric(metric)` / `aggregate_stats()`
 
 ### 22.5 CLI
@@ -1173,16 +1178,131 @@ python -m terrain.supervisor --reset-overrides
 
 ***
 
-## 23. v8.x / v9.0 升级速查表
+## 23. v8.x / v9.x 升级速查表
 
-| 版本 | 主题 | 关键能力 |
+| 版本       | 主题                       | 关键能力                                                                                                                                           |
+| -------- | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| **v7.0** | 超大陆旋回 + 七大维度修复           | plate\_sim v3.0 / M1–M6 / geo\_context / visualize\_context                                                                                    |
+| **v7.1** | 气候系统升级                   | 大陆度指数 CI / 极地冰盖过渡带 / 副热带高压 / 深水汽输送                                                                                                             |
+| **v7.2** | 气候去伪影                    | σ=2.2 高斯平滑地形，消除 ridged\_fbm 与纬向 T 拍频                                                                                                           |
+| **v7.3** | 气候细修                     | 分纬度带 CI 权重 / `distance_transform_edt` 语义修正                                                                                                     |
+| **v7.4** | 极地校准                     | P-POLAR v8，泰加林生存窗口修复                                                                                                                           |
+| **v8.2** | 河流初版                     | carve\_rivers / paint\_rivers（硬边界 / 单调三档）                                                                                                      |
+| **v8.3** | 河流系统                     | 骨架+单调修复 / Hack 定律蜿蜒 / 牛轭湖 / 连续蓝度渲染                                                                                                             |
+| **v9.0** | 模块化 + 安全                 | `terrain/dl/` 五阶段扩散 / `terrain/supervisor/` 闭环反思 / `torch.load(weights_only=True)` / URL 白名单 / 相对导入重构 / 512 项测试                                |
+| **v9.1** | SRNet 训练完成 + Pipeline 集成 | SRNet（ESRGAN）300 epoch 训练完成（60 mosaics / 梯度保真优于 Bicubic）/ `DiffusionPipeline` 修复 SRNet 权重加载 / 新增 `_run_srnet_train.py` + `_run_pipeline_sr.py` |
+| **v10** | C++ 原生加速 | `terrain/native/`（pybind11）15 内核与 Numba 逐位一致；全流程 146.3s → 139.9s（详见 §24）                                                    |
+| **v11** | OpenMP 并行 + 碎片清理 C++ 化 | median 33.7x / scan_ew 9.1x；`smooth_small_patches` 替代 9×ndi_label（27 次 4096² 标注）；render_world 28.52s → 24.99s                       |
+| **v12** | 去重精简 + 文档合并 | 删除 10 兼容薄封装 + 60+ 一次性诊断脚本；文档合并（README / TECHNICAL / ARCHITECTURE 三份）                                                  |
+
+***
+
+## 24. C++ 原生加速（terrain/native/, v10 起）
+
+### 24.1 架构与接入
+
+`terrain/native/` 是 pybind11 编译的扩展 `fws_native`（`fws_native.*.so`），把最耗时的数值内核下沉到 C++：
+
+- **接入方式**（自动回退）：`climate_module.py` / `hydro_module.py` / `temperature_module.py` 顶部统一：
+
+  ```python
+  try:
+      from ..native import fws_native as _native
+  except ImportError:
+      _native = None        # 缺失/导入失败 → 全部走 Numba 实现
+  ```
+
+- **逐位一致**：15 个内核与 Numba 实现逐位对齐（`terrain/native/tests/cmp_native.py` / `cmp_adv.py` 对拍）。
+
+### 24.2 内核清单（15 个）
+
+| 分组 | 内核 | 用途 |
 | --- | --- | --- |
-| **v7.0** | 超大陆旋回 + 七大维度修复 | plate_sim v3.0 / M1–M6 / geo_context / visualize_context |
-| **v7.1** | 气候系统升级 | 大陆度指数 CI / 极地冰盖过渡带 / 副热带高压 / 深水汽输送 |
-| **v7.2** | 气候去伪影 | σ=2.2 高斯平滑地形，消除 ridged_fbm 与纬向 T 拍频 |
-| **v7.3** | 气候细修 | 分纬度带 CI 权重 / `distance_transform_edt` 语义修正 |
-| **v7.4** | 极地校准 | P-POLAR v8，泰加林生存窗口修复 |
-| **v8.2** | 河流初版 | carve_rivers / paint_rivers（硬边界 / 单调三档） |
-| **v8.3** | 河流系统 | 骨架+单调修复 / Hack 定律蜿蜒 / 牛轭湖 / 连续蓝度渲染 |
-| **v9.0** | 模块化 + 安全 | `terrain/dl/` 五阶段扩散 / `terrain/supervisor/` 闭环反思 / `torch.load(weights_only=True)` / URL 白名单 / 相对导入重构 / 512 项测试 |
+| 降水族 | `scan_ew_step` / `scan_ns_step` | 纬向/经向降水扫描（东西南北四方向） |
+| | `mountain_shield` | 地形雨遮蔽（迎风坡增雨 / 背风坡雨影） |
+| | `median_filter_njit` / `mode_filter_njit` | 群系标签中值/众数平滑（直方图法，int8 值域） |
+| 水系族 | `flow_acc_kahn` | D8 流量累积（Kahn 拓扑序） |
+| | `fill_depressions_bf` | 洼地填充（Barnes 2014 堆+FIFO 改进版，1.41x） |
+| | `trace_centerline` | 河流骨架追踪（零拷贝数组直读） |
+| | `monotonic_repair` | 沿程单调修复（零拷贝数组直读） |
+| | `carve_path_dig` / `carve_oxbow` | 河道雕刻 / 牛轭湖切割 |
+| | `meander_single_river` | Hack 定律蜿蜒（单河完整流程 njit） |
+| | `rasterize_polylines` | 折线栅格化 |
+| | `smooth_small_patches` | 碎片清理（单遍 BFS 连通分量 + 面积过滤，替代 9×ndi_label） |
+| 气温族 | `ocean_run_lengths` | 洋流东西游程统计 |
+
+### 24.3 构建（仅改 C++ 后需要）
+
+```bash
+# 解释器须与目标 Python 匹配（本项目用 Python 3.14）
+cd terrain/native && python3 setup.py build_ext --inplace
+```
+
+**macOS 注意**：
+
+- OpenMP 需要 `brew install libomp`，setup.py 使用 `-Xpreprocessor -fopenmp` + `-I/opt/homebrew/opt/libomp/include`。
+- **双 libomp runtime 坑**：torch 自带 `libomp.dylib`（install_name=`/opt/llvm-openmp/lib/libomp.dylib`）。若 `fws_native.so` 链接 brew libomp 会触发 `OMP Error #15` 段错误。解法：`extra_link_args` 加 `-L<torch>/lib -Wl,-rpath,<torch>/lib -lomp`，让 `-fopenmp` 隐式 `-lomp` 解析到 torch 自带库。
+- **GIL 坑**：pybind 绑定一律不加 `py::call_guard<py::gil_scoped_release>()`——OpenMP 线程是原生线程不需要 GIL，而 `gil_scoped_release` 下构造返回的 numpy 数组（`PyArray_NewFromDescr`）会段错误。
+- **零拷贝**：大数组（4096²）参数必须用 `py::array + dtype 分派模板`零拷贝直读；`py::array_t<T, forcecast>` 会无条件拷贝（曾导致全流程 +34s）。
+
+### 24.4 实测性能（4096²，Apple Silicon MPS）
+
+| 指标 | Numba 回退 | C++ native |
+| --- | --- | --- |
+| 全流程 | 146.3s | 139.9s |
+| render_world | 28.52s → 24.99s（v11） | — |
+| median 滤波 | 8.9s | 0.27s（33.7x） |
+| scan_ew | 478ms | 53ms（9.1x） |
+| fill_depressions | 1771ms（全陆） | 1260ms（bf，1.41x） |
+
+> 注：`fill_depressions_bf` 采用 Barnes 2014 improved variant（堆+FIFO），堆与 FIFO **按水位交错推进**才能与标准 PF+eps 逐位一致（若每次堆 pop 后清空 FIFO，|d|/eps 可达 71 的偏差）。
+
+***
+
+## 25. 关键配置参数表（调参速查）
+
+> 数值集中在各模块文件顶部与函数内的命名常量中；改参后删除 `cache/` 对应缓存即可生效。
+
+### 25.1 气候 / 生物群系（climate_module.py，群系分类阈值 204–237 行）
+
+| 参数 | 值 | 说明 |
+| --- | --- | --- |
+| 温带草原上界 | 600–800 mm | 草原/灌丛 vs 森林分界 |
+| 温带雨林下界 | 1800–2000 mm | 温带雨林起始 |
+| 荒漠降水阈值 | 400 mm | 荒漠 vs 草原分界 |
+| 热带雨林阈值 | 2500 mm | 热带雨林起始 |
+| `rng` | `np.random.RandomState`（旧式） | precipitation_field 禁用 `default_rng`（新式 Generator） |
+
+### 25.2 温度 / 极地（temperature_module.py，极地冷却 162–165 行）
+
+| 参数 | 值 | 说明 |
+| --- | --- | --- |
+| 极地冰盖冷却 | 60° 无冷却 → 90° 最大 −18℃ | 模拟永久冰盖反照率正反馈，修复极地偏暖 |
+| `_edt_lowres` | 1024² EDT + `np.repeat` 上采样 | 洋流 5 次 EDT 的主加速路径（4x） |
+
+### 25.3 地形 / 海岸（generate_world.py 1119–1132 行 + create_continental_shelf）
+
+| 参数 | 值 | 说明 |
+| --- | --- | --- |
+| 陆地比例目标 | 30%（4096 原始分辨率） | 通过淹没低地校准 |
+| 浅海（大陆架）占比 | 5.9–6.5%（近地球） | `create_continental_shelf` 生成；`balance_land_latitude` 平衡人工痕迹 |
+| 出口走廊 | `d_o ≤ 60px` 保持原始深海高程 | 排水通道；其余海洋抬升至 `z_far` |
+
+### 25.4 M5 克拉通盆地（generate_world.py）
+
+| 参数 | 值 | 说明 |
+| --- | --- | --- |
+| `max_exo` | 1 | 单个超大外生盆地 |
+| mask 半径 | 1000 px | 克拉通盆地遮罩 |
+| 出口间距 | 2200 px | 外生出口间隔 |
+| `z_far` 上限 | 1500 m | 确保盆地整体在 `high_elev_compress` 压缩范围外 |
+
+### 25.5 河流网络（hydro_module.py）
+
+| 参数 | 值 | 说明 |
+| --- | --- | --- |
+| 坡度曲线 | `t^0.3` 凹形 | 出口附近极陡（~15m/px）抵抗高斯平滑 |
+| 噪声参数 | ±0.2m 低频 + ±0.05m 逐像素 | 25x 坡度优势 |
+| 堤坝系统 | mask 边界 25px 环带抬至 `z_far+150m` | 阻断 D8 侧漏 |
+| `largest_basin_share` | 接近地球 4.37%（偏差 ≤15%） | 河流网络优化目标 |
 

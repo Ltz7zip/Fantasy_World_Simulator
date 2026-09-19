@@ -23,6 +23,7 @@ LATS = (-90.0 + (np.arange(S) + 0.5) * (180.0 / S)).astype(np.float32)
 
 
 def main() -> int:
+    """入口: 渲染真实地球(同风格) + 10 种子生成图拼成对比拼图 worlds_montage.png。"""
     try:
         earth = load_earth()
     except Exception as exc:

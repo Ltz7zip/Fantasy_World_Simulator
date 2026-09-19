@@ -137,6 +137,7 @@ class DenseBlock(nn.Module):
         self.compress = nn.Conv2d(ch, in_ch, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """前向：逐层拼接前层输出提取特征，最后 1×1 压缩回 in_ch。"""
         feats = [x]
         for layer in self.layers:
             out = layer(torch.cat(feats, dim=1))
@@ -171,6 +172,7 @@ class RRDB(nn.Module):
         self.attention = CCABlock(in_ch) if use_attention else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """前向：3 个 DenseBlock 残差嵌套，可选加 CCA 注意力。"""
         out = x
         out = out + self.beta * self.db1(out)
         out = out + self.beta * self.db2(out)
@@ -304,6 +306,7 @@ class SRDiscriminator(nn.Module):
         """初始化判别器。"""
         super().__init__()
         def block(c_in, c_out, stride=1, norm=True):
+            """构造单层判别器卷积块：Conv + 可选 BN + LeakyReLU。"""
             layers = [nn.Conv2d(c_in, c_out, 3, stride=stride, padding=1)]
             if norm:
                 layers.append(nn.BatchNorm2d(c_out))
@@ -429,6 +432,7 @@ def sr_gradient_loss(pred: torch.Tensor, target: torch.Tensor
                            device=pred.device).view(1, 1, 3, 3)
 
     def grad(img):
+        """计算图像 x/y 方向 Sobel 梯度。"""
         gx = F.conv2d(img, sobel_x, padding=1)
         gy = F.conv2d(img, sobel_y, padding=1)
         return gx, gy
@@ -764,6 +768,7 @@ class SRDataset(Dataset):
         self.lr_patch = patch_size // scale
 
     def __len__(self) -> int:
+        """返回预设切片数 n_patches。"""
         return self.n_patches
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:

@@ -51,6 +51,7 @@ class LDMInference:
                  cond_base: int = 64,
                  ldm_base: int = 128,
                  use_cross_attn: bool = True):
+        """加载 VAE、条件编码器、去噪 U-Net 权重（含 EMA 影子）并构建 DDIM 采样器。"""
         # ---- 加载 VAE ----
         vae_path = vae_ckpt or str(CKPT_DIR / "vae_phase1.pt")
         self.vae = TerrainVAE(in_ch=IN_CHANNELS, latent_ch=LATENT_CHANNELS,

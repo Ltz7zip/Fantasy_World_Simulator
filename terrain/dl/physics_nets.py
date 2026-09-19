@@ -38,6 +38,7 @@ class RiverNet(nn.Module):
     """
 
     def __init__(self, in_ch: int = 2, base: int = 16):  # ch0=高程, ch1=坡度
+        """初始化河网分割 U-Net 的编码器/瓶颈/解码器与输出头。"""
         super().__init__()
         # 编码器
         self.enc1 = nn.Sequential(
@@ -132,6 +133,7 @@ class SnowlineNet(nn.Module):
     """
 
     def __init__(self, in_ch: int = 3, base: int = 16):
+        """初始化雪线回归网络：三层轻量 CNN 堆叠。"""
         super().__init__()
         self.net = nn.Sequential(
             nn.Conv2d(in_ch, base, 3, padding=1), nn.SiLU(),
@@ -172,6 +174,7 @@ class CoastNet(nn.Module):
     """
 
     def __init__(self, in_ch: int = 1, base: int = 16):
+        """初始化海岸线三分类 U-Net（与 RiverNet 同结构，输出 3 通道）。"""
         super().__init__()
         self.enc1 = nn.Sequential(
             nn.Conv2d(in_ch, base, 3, padding=1), ResBlock(base, base))

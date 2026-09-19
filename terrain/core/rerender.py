@@ -6,8 +6,7 @@ rerender.py —— 只重画, 不动数据
 用途：按需加载已生成的 DEM 数据并重新渲染 PNG 图像，不触发任何世界生成逻辑。
 
 CLI 用法示例：
-  python terrain/core/rerender.py        # 从 core 目录直接运行
-  python terrain/rerender.py             # 兼容层入口（任意工作目录可运行）
+  python -m terrain.core.rerender        # 从项目根目录运行
 =============================================================
 """
 import os

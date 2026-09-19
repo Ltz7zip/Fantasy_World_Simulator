@@ -1,12 +1,18 @@
-# 幻想世界生成器 (terrain/) —— 使用文档 · v9.0
+# 幻想世界生成器 (terrain/) —— 使用文档 · v12
 
-板块演化 + 神经网络混合驱动的随机世界地图生成器。物理规则层负责地质 / 气候 / 水文的因果骨架，GAN 负责像素级地形纹理；同时提供 **4 面板可视化**与**单文件离线 HTML 交互报告**。
+板块演化 + 神经网络混合驱动的随机世界地图生成器。物理规则层负责地质 / 气候 / 水文的因果骨架，GAN 负责像素级地形纹理；同时提供 **4 面板可视化**、**单文件离线 HTML 交互报告**与 **C++ 原生加速**（Numba 自动回退）。
 
-> **v9.0 升级要点**：气候系统 v7.1–v7.4（大陆度指数 / 极地冰盖 / 泰加林修复）、河流水系 v8.3（骨架提取 + 沿程单调修复 / Hack 定律蜿蜒 / 牛轭湖 / 连续蓝度渲染）、新增 **深度学习模块 `terrain/dl/`**（DDPM → LDM → 物理监督 → 大规模推理 → 端到端管线 + ESRGAN 超分）、新增 **监督反思模块 `terrain/supervisor/`**（审计 → 反思 → 学习日志 → 自动注入 overrides）、安全加固（`torch.load(weights_only=True)` / URL scheme 白名单）、测试套件 33 → **512 项**。
+> **v12 升级要点**：删除 `terrain/` 根目录 10 个兼容薄封装与 60+ 个一次性诊断脚本，统一使用 `terrain.core.*` / `terrain.scripts.*` 导入；文档合并精简（唯一使用文档 = 本 README，技术文档 = `terrain/docs/TECHNICAL.md`）。
+>
+> **v10–v11 升级要点**：**C++ 原生加速模块 `terrain/native/`**（pybind11，15 个内核：降水扫描 / 山体遮蔽 / 中值-众数滤波 / 流量累积 / 洼地填充 / 河流蜿蜒等，全部与 Numba 逐位一致）；v11 引入 OpenMP 并行（`smooth_small_patches` 替代 9×ndi_label 碎片清理，`render_world` 28.52s → 24.99s）。
+>
+> **v9.1 升级要点**：SRNet（ESRGAN）超分网络正式训练完成（300 epoch / 60 mosaics / 梯度保真优于 Bicubic）、`DiffusionPipeline` 集成 SRNet 并修复权重加载逻辑（`use_sr=True` 时自动加载 `sr_net.pt`）、新增训练脚本 `terrain/scripts/_run_srnet_train.py` 与运行脚本 `terrain/scripts/_run_pipeline_sr.py`。
+>
+> **v9.0 升级要点**：气候系统 v7.1–v7.4（大陆度指数 / 极地冰盖 / 泰加林修复）、河流水系 v8.3（骨架提取 + 沿程单调修复 / Hack 定律蜿蜒 / 牛轭湖 / 连续蓝度渲染）、新增 **深度学习模块** **`terrain/dl/`**（DDPM → LDM → 物理监督 → 大规模推理 → 端到端管线 + ESRGAN 超分）、新增 **监督反思模块** **`terrain/supervisor/`**（审计 → 反思 → 学习日志 → 自动注入 overrides）、安全加固（`torch.load(weights_only=True)` / URL scheme 白名单）、测试套件 33 → **512 项**。
 
 ## 目录结构
 
-> 【核心源码位于 terrain/core/；terrain/ 根目录同名 .py 为兼容薄封装（≈8 行/个，勿编辑）】
+> 【核心源码位于 terrain/core/ 与 terrain/modules/；v12 起已删除 terrain/ 根目录的兼容薄封装，请勿再引用旧路径】
 
 ```
 Fantasy_World_Simulator/
@@ -15,10 +21,7 @@ Fantasy_World_Simulator/
 │
 ├── terrain/
 │   ├── docs/              ← 文档目录
-│   │   ├── README.md          (安装 + 使用, 同根目录 README)
-│   │   └── TECHNICAL.md       (架构 / 算法 / 接口 / 参数)
-│   │
-│   ├── generate_world.py / geo_context.py / ...  ← 兼容薄封装 (勿编辑; 真实实现见 core/ 与 scripts/)
+│   │   └── TECHNICAL.md       (架构 / 算法 / 接口 / 参数, 面向调参; 另有历史 IMPROVEMENT_PLAN.md)
 │   │
 │   ├── core/              ← 核心源码 (8 个模块, 请在这里编辑)
 │   │   ├── __init__.py
@@ -30,15 +33,27 @@ Fantasy_World_Simulator/
 │   │   ├── geo_context.py         WorldGeoContext 单例: 坐标查询 / KPI 统计 / 多边形裁切
 │   │   └── visualize_context.py   4 面板 PNG + 交互 HTML 报告 (探针/多边形/剖面联动)
 │   │
-│   ├── dl/                ← 深度学习模块 (v9.0 新增, 5 阶段)
+│   ├── modules/           ← 模块化引擎 (可独立优化, 见 modules/ARCHITECTURE.md)
+│   │   ├── base.py / engine.py        WorldContext 共享上下文 + WorldEngine 编排器
+│   │   ├── terrain_module.py          地形 (高程 / 坡度 / 地貌 / 地形图)
+│   │   ├── hydro_module.py            水系 (流量累积 / 河流 / 湖泊 / 水系图)
+│   │   ├── temperature_module.py      气温 (大陆度 / 洋流 / 温度场 / 气温图)
+│   │   └── climate_module.py          气候 (降水 / 生物群系 / 气候图)
+│   │
+│   ├── native/            ← C++ 原生加速 (v10 起, pybind11, 15 内核)
+│   │   ├── setup.py / src/            (common/climate/hydro/hydro_adv/temperature/bindings.cpp)
+│   │   ├── fws_native.*.so            已内置免构建; 缺失时自动回退 Numba
+│   │   └── tests/                     cmp_native.py / cmp_adv.py 对拍脚本
+│   │
+│   ├── dl/                ← 深度学习模块 (v9.0 新增, 5 阶段; v9.1 SRNet 训练完成)
 │   │   ├── config.py / logger.py / metrics.py / evaluator.py   配置 / 日志 / 指标
 │   │   ├── vae.py / unet.py / diffusion.py / ddim.py           VAE + DDPM/DDIM 扩散
 │   │   ├── dataset.py / paired_dataset.py / train.py / train_ldm.py  训练
 │   │   ├── infer.py / infer_ldm.py / large_infer.py            推理 (含大规模瓦片调度)
 │   │   ├── physics_nets.py / physics_dataset.py / physics_metrics.py / train_physics.py / infer_physics.py  物理监督 (河网/雪线/海岸)
-│   │   ├── sr_net.py        ESRGAN 超分辨率网络
+│   │   ├── sr_net.py        ESRGAN 超分辨率网络 (v9.1 训练完成: base=32, n_rrdb=3, CCA 注意力)
 │   │   ├── multicond.py     多模态条件编码器 (草图/高度/群落)
-│   │   └── pipeline.py      端到端集成管线
+│   │   └── pipeline.py      端到端集成管线 (v9.1 修复 SRNet 权重加载)
 │   │
 │   ├── supervisor/        ← 监督反思模块 (v9.0 新增)
 │   │   ├── __main__.py / cli.py   CLI 入口 (审计 / 历史查询 / 重置 overrides)
@@ -47,11 +62,13 @@ Fantasy_World_Simulator/
 │   │   ├── references.py          地球参考真值
 │   │   └── learning_log.py        JSONL 学习日志 + 聚合统计
 │   │
-│   ├── scripts/           ← 批处理脚本 (请在这里编辑)
+│   ├── scripts/           ← 批处理脚本 (v12 精简为 5 个, 请在这里编辑)
 │   │   ├── __init__.py
 │   │   ├── batch_gen.py         批量生成多种子
 │   │   ├── analyze_worlds.py    地理指标检验 (vs 地球)
-│   │   └── make_montage.py      生成对比拼图
+│   │   ├── make_montage.py      生成对比拼图
+│   │   ├── _run_srnet_train.py  (v9.1) SRNet 超分网络训练 (300 epoch)
+│   │   └── _run_pipeline_sr.py  (v9.1) DiffusionPipeline 运行 (启用 SRNet 超分)
 │   │
 │   ├── tests/                 ← 单元测试 (512 项, pytest)
 │   │   ├── test_visualize_context.py   可视化 / HTML 报告 / geo_context (33 项)
@@ -76,7 +93,7 @@ Fantasy_World_Simulator/
 
 ## 安装步骤
 
-> 要求 **Python 3.9 \~ 3.12**（Apple Silicon / x86-64 均可；torch / numpy 需要匹配）。
+> 要求 **Python 3.11 \~ 3.14**（项目实测于 Python 3.14.6；Apple Silicon / x86-64 均可；torch / numpy / numba 需要匹配解释器版本）。
 
 ```bash
 # 1) 克隆并进入项目根目录
@@ -94,7 +111,8 @@ pip install torch numpy scipy matplotlib Pillow  # 生成 + 可视化都需要
 pip install pytest                                 # 跑单元测试 (可选, 开发用)
 
 # 4) 快速自检 (生成 seed=1 的 2048² 世界)
-python terrain/generate_world.py --seed 1 --size 2048
+# ⚠ 核心脚本含包内相对导入，必须用 `python -m` 方式调用（不能直接 `python terrain/core/xxx.py`）
+python -m terrain.core.generate_world --seed 1 --size 2048
 
 # （首次运行推荐）检查依赖并跑菜单 → python main.py
 ```
@@ -107,7 +125,7 @@ python terrain/generate_world.py --seed 1 --size 2048
 
 ```bash
 # 项目根目录运行 (脚本内部全部使用基于 __file__ 的绝对路径, 任意目录均可)
-python terrain/generate_world.py --seed 0 --size 2048
+python -m terrain.core.generate_world --seed 0 --size 2048
 ```
 
 首次运行约 **2\~4 分钟**（板块演化 450 Myr 模拟占大头；同 seed 再次运行走缓存 **< 10 秒**完成）。
@@ -115,25 +133,30 @@ python terrain/generate_world.py --seed 0 --size 2048
 
 ## 常用任务
 
-⬇ 推荐使用 terrain/core/ 与 terrain/scripts/ 下的真实脚本；terrain/ 根目录同名文件为兼容薄封装，也能跑但会多一跳 re-export。
+⬇ 推荐使用 terrain/core/ 与 terrain/scripts/ 下的真实脚本（v12 已删除 terrain/ 根目录兼容薄封装）。
 
-| 任务                        | 命令                                                                                                                                                         |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 换一个世界                     | `python terrain/core/generate_world.py --seed 任意整数 --size 2048`                                                                                            |
-| 更大分辨率 (4096²)             | `--size 4096`（约 4 倍耗时, 16 倍显存）                                                                                                                             |
-| **4 面板可视化 PNG**           | `python terrain/core/visualize_context.py --seed 1`（高程 / 坡度 / 地理带 / 剖面）                                                                                    |
-| **交互 HTML 报告（仅 HTML）**    | `python terrain/core/visualize_context.py --seed 1 --no-png --html`                                                                                        |
-| **PNG + HTML 双产出 + 叠加元素** | `python terrain/core/visualize_context.py --seed 1 --html --points "39,116,CityA,35,139,CityB" --poly "30,-5,30,35,45,35,45,-5" --profile "60,-10,25,125"` |
-| 只调渲染不改地形                  | `python terrain/core/rerender.py`                                                                                                                          |
-| 单独调试板块模拟                  | `python terrain/core/plate_sim.py --seed 7 --T 512`                                                                                                        |
-| 批量生成多种子                   | `python terrain/scripts/batch_gen.py --seeds 1 2 3 4 5`                                                                                                    |
-| 地理指标检验 (vs 地球)            | `python terrain/scripts/analyze_worlds.py` → 输出 `analysis_results.json`                                                                                    |
-| 生成对比拼图                    | `python terrain/scripts/make_montage.py`                                                                                                                   |
-| 单元测试 (512 项)               | `pytest terrain/tests/ -v`                                                                                                                                 |
-| 监督审计 + 反思学习              | `python -m terrain.supervisor --seed 42 --size-px 2048`                                                                                                    |
-| 查询学习日志                    | `python -m terrain.supervisor --history 10`                                                                                                                |
-| DL 模块训练 (扩散模型)            | `python -m terrain.dl.train` (详见 TECHNICAL §21)                                                                                                           |
-| 重训 GAN                    | 删除 `checkpoints/best_terrain_gan_v5.pth` 后 `python terrain/core/terrain_engine.py`（需 `data/ETOPO1`, 2.5\~4h / MPS）                                         |
+> **运行方式**：`terrain/core/*.py` 使用包内相对导入，**必须**以 `python -m terrain.core.xxx` 调用；
+> `terrain/scripts/*.py` 自带 sys.path 注入，可直接 `python terrain/scripts/xxx.py`。
+
+| 任务                                   | 命令                                                                                                                                                         |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 换一个世界                                | `python -m terrain.core.generate_world --seed 任意整数 --size 2048`                                                                                            |
+| 更大分辨率 (4096²)                        | `--size 4096`（约 4 倍耗时, 16 倍显存）                                                                                                                             |
+| **4 面板可视化 PNG**                      | `python -m terrain.core.visualize_context --seed 1`（高程 / 坡度 / 地理带 / 剖面）                                                                                    |
+| **交互 HTML 报告（仅 HTML）**               | `python -m terrain.core.visualize_context --seed 1 --no-png --html`                                                                                        |
+| **PNG + HTML 双产出 + 叠加元素**            | `python -m terrain.core.visualize_context --seed 1 --html --points "39,116,CityA,35,139,CityB" --poly "30,-5,30,35,45,35,45,-5" --profile "60,-10,25,125"` |
+| 只调渲染不改地形                             | `python -m terrain.core.rerender`                                                                                                                          |
+| 单独调试板块模拟                             | `python -m terrain.core.plate_sim --seed 7 --T 512`                                                                                                        |
+| 批量生成多种子                              | `python terrain/scripts/batch_gen.py --seeds 1 2 3 4 5`                                                                                                    |
+| 地理指标检验 (vs 地球)                       | `python terrain/scripts/analyze_worlds.py` → 输出 `analysis_results.json`                                                                                    |
+| 生成对比拼图                               | `python terrain/scripts/make_montage.py`                                                                                                                   |
+| 单元测试 (512 项)                         | `pytest terrain/tests/ -v`                                                                                                                                 |
+| 监督审计 + 反思学习                          | `python -m terrain.supervisor --seed 42 --size-px 2048`                                                                                                    |
+| 查询学习日志                               | `python -m terrain.supervisor --history 10`                                                                                                                |
+| DL 模块训练 (扩散模型)                       | `python -m terrain.dl.train` (详见 TECHNICAL §21)                                                                                                            |
+| **(v9.1) SRNet 超分训练**                | `python terrain/scripts/_run_srnet_train.py`（300 epoch / 约 67min / MPS）                                                                                    |
+| **(v9.1) DiffusionPipeline + SRNet** | `python terrain/scripts/_run_pipeline_sr.py`（LDM 生成 → SRNet 4× 超分）                                                                                         |
+| 重训 GAN                               | 删除 `checkpoints/best_terrain_gan_v5.pth` 后 `python -m terrain.core.terrain_engine`（需 `data/ETOPO1`, 2.5\~4h / MPS）                                         |
 
 ### 叠加元素的正确格式
 
@@ -201,8 +224,8 @@ git log --oneline             # 查看历史提交
 
 ### Q4: 生成 HTML 报告时 `TypeError: not enough arguments for format string`
 
-有人直接编辑了 `terrain/visualize_context.py` 里的 `_HTML_TEMPLATE` 三引号块，并且在 CSS/JS 中加入了**字面量** **`%`**（比如写 `width:100%` 而不是 `width:100%%`），与 Python 的 `%(KEY)s` 占位符冲突。
-**修复**：把模板里所有 `%(KEY)format` 保留为原样，其余单独的**字面量百分号一律翻倍为** **`%%`**（重新 git checkout visualize\_context.py 也可恢复到经过验证的版本）。
+有人直接编辑了 `terrain/core/visualize_context.py` 里的 `_HTML_TEMPLATE` 三引号块，并且在 CSS/JS 中加入了**字面量** **`%`**（比如写 `width:100%` 而不是 `width:100%%`），与 Python 的 `%(KEY)s` 占位符冲突。
+**修复**：把模板里所有 `%(KEY)format` 保留为原样，其余单独的**字面量百分号一律翻倍为** **`%%`**（重新 git checkout terrain/core/visualize_context.py 也可恢复到经过验证的版本）。
 
 ### Q5: 没有 ETOPO1 数据能跑吗？
 
@@ -220,13 +243,13 @@ git log --oneline             # 查看历史提交
 用 `geo_context.py` 的公开单例（见 TECHNICAL §16）：
 
 ```python
-from terrain.geo_context import get_ctx
+from terrain.core.geo_context import get_ctx
 ctx = get_ctx(seed=1, size=2048)
 print(ctx.get_elevation(39.9, 116.4))   # 北京: 海拔 米
 print(ctx.region_stats(polygon=[(30,-5),(30,35),(45,35),(45,-5)]))  # 地中海方块统计
 ```
 
-> v9.0 起所有核心模块使用相对/绝对导入，`terrain` 包可直接 `import terrain.xxx`，无需手动 `sys.path` 注入。
+> v9.0 起所有核心模块使用相对/绝对导入，`terrain` 包可直接 `import terrain.core.xxx`，无需手动 `sys.path` 注入。
 
 ### Q8: 设备要求？
 
@@ -234,25 +257,29 @@ print(ctx.region_stats(polygon=[(30,-5),(30,35),(45,35),(45,-5)]))  # 地中海�
 
 - **纯 CPU** 也能跑（GAN 瓦片推理会慢 5\~10 倍，但板块模拟纯 numpy 速度差不多）。
 
-### Q9: IDE / Git 显示 terrain/ 下有两份同名 .py，该编辑哪一份？
+### Q9: 之前 terrain/ 下有两份同名 .py，现在只剩一份，会不会破坏导入？
 
-**只编辑 terrain/core/ 和 terrain/scripts/ 下的文件**。terrain/ 根目录的 .py 是兼容转发薄封装（约 8 行），每次 import terrain 时自动将 core/ 注入 sys.path，然后做 `*` re-export。
+**不会。** v12 已删除 terrain/ 根目录的 10 个兼容薄封装与 60+ 个一次性诊断脚本，统一使用：
 
-如果你误编辑了 terrain/ 根目录的薄封装文件，git diff 会出现两份差异：一份是 8 行 re-export 薄封装的改动，另一份是 terrain/core/ 下真正实现的改动（改动不会同步）。
+- `terrain/core/*`：核心实现（plate_sim / tectonics / terrain_engine / generate_world / rerender / geo_context / visualize_context）
+- `terrain/scripts/*`：批处理脚本（batch_gen / analyze_worlds / make_montage / _run_srnet_train / _run_pipeline_sr）
 
-**修复方式**：先恢复薄封装到干净状态，再去 core/ 或 scripts/ 下编辑真实文件：
+所有正式代码、测试（`terrain/tests/`）与 `main.py` 均已直接引用 `terrain.core.*`，删除薄封装后导入不受影响（已由 512 项测试验证）。若你的旧脚本还写着 `from terrain_engine import ...` 或 `from terrain.geo_context import ...`，请改为 `from terrain.core.terrain_engine import ...` / `from terrain.core.geo_context import ...`。
 
-```bash
-git checkout -- terrain/generate_world.py terrain/geo_context.py terrain/plate_sim.py terrain/terrain_engine.py terrain/visualize_context.py terrain/tectonics.py terrain/rerender.py terrain/batch_gen.py terrain/analyze_worlds.py terrain/make_montage.py
-```
+### Q10: 什么是 C++ 原生加速？需要额外安装吗？
 
-或简写：
+v10 起新增 `terrain/native/`（pybind11 扩展 `fws_native`），把最耗时的 15 个内核（降水扫描 / 山体遮蔽 / 中值-众数滤波 / 流量累积 / 洼地填充 / 河流蜿蜒 / 碎片清理等）编译为 C++，与 Numba 实现**逐位一致**。`fws_native.*.so` 已随仓库内置，**开箱即用、无需安装**。
 
-```bash
-git checkout -- terrain/*.py
-```
+- 缺失或导入失败时，`climate_module.py` / `hydro_module.py` / `temperature_module.py` 会自动回退 Numba 实现（仅变慢，不影响结果）。
+- 手动重新构建（改 C++ 后）：`cd terrain/native && python3 setup.py build_ext --inplace`，需要 `pybind11`；Apple clang 并行版本还需 `brew install libomp`（见 TECHNICAL §22）。
 
-然后去 `terrain/core/generate_world.py`（或对应模块）下真正修改实现代码。
+### Q11: 文档里有哪些版本？各版本对应什么？
+
+| 文档          | 内容                                             | 读者      |
+| ----------- | ---------------------------------------------- | ------- |
+| `README.md` | 项目概述 / 安装 / 快速开始 / 常用任务 / 缓存 / 输出 / FAQ / 依赖 | 所有人    |
+| `terrain/docs/TECHNICAL.md` | 管线总览 / 各算法原理 / 接口定义 / 配置参数 / native 加速 | 调参与开发 |
+| `terrain/modules/ARCHITECTURE.md` | 模块化引擎抽象 / 数据契约 / 扩展指南 | 二次开发  |
 
 ## 依赖列表
 
@@ -264,4 +291,8 @@ git checkout -- terrain/*.py
 | `matplotlib` | ≥ 3.6  | 彩色渲染 / 4 面板 PNG / 色图             |
 | `Pillow`     | ≥ 9.0  | PNG 保存 / HTML 图层 base64 编码       |
 | `pytest`     | ≥ 7.0  | 单元测试（开发可选）                       |
+| `pybind11`   | ≥ 2.10 | 构建 C++ 原生扩展（仅改 native/ 后需要）      |
+| `libomp`     | ≥ 15   | OpenMP 运行时（仅 macOS 手动重建 native 需要，`brew install libomp`） |
+
+> **运行时不需要** pybind11 / libomp：`terrain/native/fws_native.*.so` 已内置，缺失时自动回退 Numba。
 

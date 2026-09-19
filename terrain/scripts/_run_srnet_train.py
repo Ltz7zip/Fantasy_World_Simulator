@@ -12,6 +12,7 @@ from terrain.dl.sr_net import train_sr
 
 
 def main():
+    """入口: 用 sr_hr_mosaic_large.npy 数据正式训练 SRNet 超分网络并保存 history。"""
     print("=" * 60, flush=True)
     print("【SRNet 正式训练 v3】epochs=300, scale=4, batch=8, n_patches=2000", flush=True)
     print("  数据: terrain/data/sr_hr_mosaic_large.npy (6144x10240, 60 mosaics)", flush=True)

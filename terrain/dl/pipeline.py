@@ -213,6 +213,7 @@ class DiffusionPipeline:
                  snowline_net=None,
                  coast_net=None,
                  multicond=None):
+        """初始化管线：保存配置与各模型引用，按配置创建条件缓存。"""
         self.config = config or PipelineConfig()
         self.device = self.config.resolve_device()
         self._ldm = ldm
@@ -238,7 +239,21 @@ class DiffusionPipeline:
         """延迟加载超分模型。"""
         if self._sr is None:
             from .sr_net import SRNet
-            self._sr = SRNet().to(self.device).eval()
+            import os
+            # 与训练脚本一致的结构参数
+            self._sr = SRNet(scale=4, use_attention=True, base=32,
+                             n_rrdb=3).to(self.device).eval()
+            # 加载训练好的权重
+            ckpt_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "checkpoints", "sr_net.pt")
+            if os.path.exists(ckpt_path):
+                state = torch.load(ckpt_path, map_location=self.device,
+                                   weights_only=True)
+                self._sr.load_state_dict(state)
+                print(f"[pipeline] SRNet 权重已加载: {ckpt_path}")
+            else:
+                print(f"[pipeline] ⚠️ 未找到 SRNet 权重: {ckpt_path}")
         return self._sr
 
     @property
@@ -290,10 +305,12 @@ class DiffusionPipeline:
                 "config": cfg.to_dict(), "degradations": []}
 
         def _cb(pct, msg):
+            """进度回调包装：存在用户回调时转发百分比与消息。"""
             if progress_callback:
                 progress_callback(pct, msg)
 
         def _log(stage, msg):
+            """阶段日志：可选打印并在进度回调中转发。"""
             if progress:
                 print(f"[pipeline] {stage}: {msg}")
             _cb(0, f"{stage}: {msg}")
@@ -434,8 +451,10 @@ class DiffusionPipeline:
         try:
             from .sr_net import sr_upscale
             t0 = time.time()
+            # 通过 property 触发权重加载
+            model = self.sr_model
             dem_hr = sr_upscale(dem_lr, scale=cfg.sr_scale,
-                                model=self._sr, device=self.device)
+                                model=model, device=self.device)
             info["stages"].append({
                 "name": "sr", "time_s": round(time.time() - t0, 2),
                 "input_size": dem_lr.shape[0],
@@ -535,6 +554,7 @@ class DiffusionPipeline:
             info_path = out_path.with_suffix(".info.json")
             # info 含 numpy 类型，转 JSON 安全格式
             def _json_safe(obj):
+                """把 numpy/Path 等类型转为 JSON 可序列化对象。"""
                 if isinstance(obj, (np.integer,)):
                     return int(obj)
                 if isinstance(obj, (np.floating,)):

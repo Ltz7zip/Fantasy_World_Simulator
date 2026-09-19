@@ -50,6 +50,7 @@ class EMA:
     """
 
     def __init__(self, model, decay: float = EMA_DECAY):
+        """初始化 EMA：克隆模型可训练参数作为影子权重。"""
         self.decay = decay
         self.shadow = {n: p.detach().clone() for n, p in model.named_parameters()
                        if p.requires_grad}
@@ -57,17 +58,20 @@ class EMA:
 
     @torch.no_grad()
     def update(self, model):
+        """用当前模型参数按指数衰减更新影子权重。"""
         for n, p in model.named_parameters():
             if n in self.shadow:
                 self.shadow[n].mul_(self.decay).add_(p.detach(), alpha=1 - self.decay)
 
     def apply(self, model):
+        """把模型参数临时替换为 EMA 影子权重（备份原参数）。"""
         for n, p in model.named_parameters():
             if n in self.shadow:
                 self.backup[n] = p.data.clone()
                 p.data.copy_(self.shadow[n])
 
     def restore(self, model):
+        """恢复 apply 前备份的原始模型参数。"""
         for n, p in model.named_parameters():
             if n in self.backup:
                 p.data.copy_(self.backup[n])
@@ -94,6 +98,7 @@ def make_sample_fn_vae(vae: TerrainVAE, ema: EMA, n_steps: int = 1):
     """为 VAE 构造采样回调：从先验 z 解码。"""
     @torch.no_grad()
     def sample(n: int) -> np.ndarray:
+        """用 EMA 权重从先验 z 解码 n 个 DEM 样本。"""
         ema.apply(vae)
         try:
             z = torch.randn(n, 4, 32, 32, device=DEVICE)
@@ -111,6 +116,7 @@ def make_sample_fn_ddpm(model: DiffusionUNet, ema: EMA, ddpm: DDPM,
     """为 DDPM 构造采样回调。"""
     @torch.no_grad()
     def sample(n: int) -> np.ndarray:
+        """用 EMA 权重 DDPM 采样 n 个 DEM 样本。"""
         ema.apply(model)
         try:
             x = ddpm.sample(model, (n, IN_CHANNELS, size, size), DEVICE,
@@ -169,7 +175,10 @@ def _train_one_stage(model, optimizer, ema, scheduler_kind: str,
         n_batches = 0
 
         for batch in loader:
-            batch = batch.to(DEVICE)
+            if isinstance(batch, (tuple, list)):
+                batch = [b.to(DEVICE) for b in batch]
+            else:
+                batch = batch.to(DEVICE)
             # ---- 学习率 ----
             lr = cosine_warmup_lr(global_step, n_steps_total,
                                   WARMUP_STEPS, LEARNING_RATE)
@@ -261,6 +270,7 @@ def train_vae(epochs: int = 50, batch_size: int = BATCH_SIZE,
     sample_fn = make_sample_fn_vae(model, ema)
 
     def loss_fn(m, x):
+        """VAE 损失：重建 + KL。"""
         recon, mu, logvar = m(x)
         loss, info = vae_loss(recon, x, mu, logvar)
         info["loss"] = float(loss.item())
@@ -290,6 +300,7 @@ def train_diffusion(epochs: int = 200, batch_size: int = BATCH_SIZE,
     sample_fn = make_sample_fn_ddpm(model, ema, ddpm)
 
     def loss_fn(m, x):
+        """DDPM 损失：随机时间步预测噪声。"""
         t = torch.randint(0, n_steps, (x.size(0),), device=DEVICE)
         loss = ddpm.p_loss(m, x, t)
         return loss, {"loss": float(loss.item())}
@@ -300,26 +311,148 @@ def train_diffusion(epochs: int = 200, batch_size: int = BATCH_SIZE,
                      ckpt_path, resume)
 
 
+# ==================== 河流条件 Diffusion 训练 ====================
+
+def make_sample_fn_river_diffusion(model, ema, ddpm, cond_sample,
+                                    n_infer: int = 50):
+    """为河流条件 DDPM 构造采样回调。
+
+    用固定条件样本做 DDIM 快速采样，返回河流 mask 概率图。
+
+    Parameters
+    ----------
+    model : ConditionalRiverDiffusion
+    ema : EMA
+    ddpm : DDPM
+    cond_sample : tuple
+        固定条件 (cond, target) 从数据集中取出的样本，用于训练期评估。
+    n_infer : int
+        DDIM 采样步数。
+    """
+    cond_fixed, target_fixed = cond_sample
+
+    @torch.no_grad()
+    def sample(n: int) -> np.ndarray:
+        """用固定条件生成 n 个河流 mask 变体。"""
+        ema.apply(model)
+        try:
+            # 用固定条件，生成 n 个变体
+            cond = cond_fixed[:1].repeat(n, 1, 1, 1).to(DEVICE)
+            shape = (n, 1, cond.shape[-2], cond.shape[-1])
+            x = ddpm.ddim_sample_conditional(
+                model, shape, cond, DEVICE, n_infer=n_infer, eta=0.0)
+            x = torch.sigmoid(x).cpu().numpy()
+        finally:
+            ema.restore(model)
+        return x.squeeze(1)  # (n, H, W)
+
+    return sample
+
+
+def train_river_diffusion(epochs: int = 100, batch_size: int = 8,
+                           n_steps: int = DIFFUSION_STEPS,
+                           target: str = "mask",
+                           lambda_braid: float = 0.1,
+                           lambda_conn: float = 0.05,
+                           resume: bool = False):
+    """训练河流条件 Diffusion 模型。
+
+    Parameters
+    ----------
+    epochs : int
+    batch_size : int
+    n_steps : int
+        DDPM 扩散步数。
+    target : str
+        目标 mask 策略：'mask' 或 'smooth'。
+    lambda_braid : float
+        抗辫状正则权重。
+    lambda_conn : float
+        连通性正则权重。
+    resume : bool
+        断点续训。
+    """
+    from .river_diffusion import (
+        ConditionalRiverDiffusion, RiverDiffusionDataset,
+        river_diffusion_loss,
+    )
+
+    # ---- 数据 ----
+    dataset = RiverDiffusionDataset(mode="river_dataset", target=target)
+    train_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True,
+                              num_workers=0, drop_last=True)
+    n_steps_total = epochs * len(train_loader)
+
+    # ---- 模型 ----
+    model = ConditionalRiverDiffusion(cond_ch=2, base=64, time_dim=128).to(DEVICE)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LEARNING_RATE,
+                                  weight_decay=WEIGHT_DECAY)
+    ema = EMA(model)
+    ddpm = DDPM(n_steps=n_steps, beta_start=BETA_START, beta_end=BETA_END,
+                device=DEVICE)
+    ckpt_path = CKPT_DIR / "river_diffusion.pt"
+
+    # ---- 固定评估条件 ----
+    cond_eval, target_eval = dataset[0]
+    cond_eval = cond_eval.unsqueeze(0)  # (1, 2, H, W)
+
+    sample_fn = make_sample_fn_river_diffusion(
+        model, ema, ddpm, (cond_eval, target_eval), n_infer=50)
+
+    # ---- 损失函数 ----
+    def loss_fn(m, batch):
+        """河流条件扩散总损失。"""
+        cond, target = batch
+        t = torch.randint(0, n_steps, (target.size(0),), device=DEVICE)
+        loss, parts = river_diffusion_loss(
+            m, target, t, cond, ddpm,
+            lambda_braid=lambda_braid, lambda_conn=lambda_conn)
+        info = {"loss": parts["total"]}
+        for k, v in parts.items():
+            if k != "total":
+                info[k] = v
+        return loss, info
+
+    _train_one_stage(model, optimizer, ema, "river_diff",
+                    train_loader, None, loss_fn, sample_fn,
+                    "river_diffusion", epochs, n_steps_total,
+                    ckpt_path, resume)
+
+
 # ==================== CLI ====================
 
 def main():
+    """CLI 入口：解析参数并分发到对应训练阶段。"""
     p = argparse.ArgumentParser(description="阶段 1 训练入口")
-    p.add_argument("--stage", choices=["vae", "diffusion"], required=True,
-                   help="训练阶段：vae 或 diffusion")
+    p.add_argument("--stage", choices=["vae", "diffusion", "river_diffusion"],
+                   required=True, help="训练阶段")
     p.add_argument("--epochs", type=int, default=None,
-                   help="训练轮数，默认 vae=50 / diffusion=200")
+                   help="训练轮数，默认 vae=50 / diffusion=200 / river_diffusion=100")
     p.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     p.add_argument("--resume", action="store_true", help="从 last.pt 断点续训")
     p.add_argument("--n-steps", type=int, default=DIFFUSION_STEPS,
-                   help="DDPM 扩散步数（仅 diffusion 阶段）")
+                   help="DDPM 扩散步数（diffusion / river_diffusion 阶段）")
+    p.add_argument("--target", choices=["mask", "smooth"], default="mask",
+                   help="河流目标策略（仅 river_diffusion）")
+    p.add_argument("--lambda-braid", type=float, default=0.1,
+                   help="抗辫状正则权重（仅 river_diffusion）")
+    p.add_argument("--lambda-conn", type=float, default=0.05,
+                   help="连通性正则权重（仅 river_diffusion）")
     args = p.parse_args()
 
     if args.stage == "vae":
         train_vae(epochs=args.epochs or 50, batch_size=args.batch_size,
                   resume=args.resume)
-    else:
+    elif args.stage == "diffusion":
         train_diffusion(epochs=args.epochs or 200, batch_size=args.batch_size,
                         n_steps=args.n_steps, resume=args.resume)
+    else:
+        train_river_diffusion(epochs=args.epochs or 100,
+                              batch_size=args.batch_size,
+                              n_steps=args.n_steps, target=args.target,
+                              lambda_braid=args.lambda_braid,
+                              lambda_conn=args.lambda_conn,
+                              resume=args.resume)
 
 
 if __name__ == "__main__":

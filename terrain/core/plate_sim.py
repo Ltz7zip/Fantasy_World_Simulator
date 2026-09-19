@@ -20,6 +20,7 @@ plate_sim.py v3.0 —— 前向板块演化模拟器(超大陆旋回版, 450 Myr
 =============================================================
 """
 import numpy as np
+from numba import njit
 from scipy.ndimage import (gaussian_filter, distance_transform_edt,
                            label as ndi_label, binary_dilation,
                            binary_erosion as ndi_binary_erosion,
@@ -37,6 +38,7 @@ _OC_V = np.array([-9000.0, -5600.0, -5480.0, -5380.0, -5300.0, -5230.0, -5150.0,
 
 
 def _rot(axis, ang):
+    """绕单位向量 axis 旋转 ang 弧度的 3x3 旋转矩阵。"""
     a = np.asarray(axis, np.float64); a = a / np.linalg.norm(a)
     x, y, z = a
     c, s = np.cos(ang), np.sin(ang); C = 1 - c
@@ -53,6 +55,7 @@ def _cross(a, b):
 
 
 def _fbm(T, rng, freq=5.0, octaves=4):
+    """在 T×T 网格上生成多倍频高斯平滑叠加的分形噪声场并归一化。"""
     noise = np.zeros((T, T), np.float32); amp, tot, f = 1.0, 0.0, freq
     for _ in range(octaves):
         n = rng.randn(T, T).astype(np.float32)
@@ -62,29 +65,49 @@ def _fbm(T, rng, freq=5.0, octaves=4):
 
 
 def _dist(m):
+    """返回掩膜 m 之外最近真值像素的欧氏距离场（全假时返回大数）。"""
     return distance_transform_edt(~m).astype(np.float32) if m.any() else np.float32(1e4)
 
 
+@njit(cache=True, fastmath=True)
 def _stamp_belt(canvas, cy, cx, ux, uy, L, W, val=1.0):
-    """M2: 沿方向(ux,uy)盖章细长山带 (along^4 平顶脊 + across 高斯剖面)"""
+    """M2: 沿方向(ux,uy)盖章细长山带 (along^4 平顶脊 + across 高斯剖面)
+
+    Numba JIT 加速版 (替代 mgrid+exp+maximum 临时数组, 直接逐像素更新 canvas)。
+    原地写入 canvas (float32), 仅当新值 > 旧值时覆盖 (等价于 np.maximum)。
+    """
     H, Wd = canvas.shape
-    cy, cx = int(round(cy)), int(round(cx))
-    n = float(np.hypot(ux, uy))
+    cy_i = int(round(cy))
+    cx_i = int(round(cx))
+    n = np.sqrt(ux * ux + uy * uy)
     if n < 1e-9:
         return
-    ux, uy = ux / n, uy / n
+    ux_n = ux / n
+    uy_n = uy / n
     pad = int(L) + 3
-    y0, y1 = max(0, cy - pad), min(H, cy + pad + 1)
-    x0, x1 = max(0, cx - pad), min(Wd, cx + pad + 1)
+    y0 = max(0, cy_i - pad)
+    y1 = min(H, cy_i + pad + 1)
+    x0 = max(0, cx_i - pad)
+    x1 = min(Wd, cx_i + pad + 1)
     if y0 >= y1 or x0 >= x1:
         return
-    yy, xx = np.mgrid[y0:y1, x0:x1]
-    dy, dx = yy - cy, xx - cx
-    along = (dx * ux + dy * uy) / max(L, 1.0)
-    across = (dx * -uy + dy * ux) / max(W, 1.0)
-    blob = np.exp(-along ** 4 - across ** 2)
-    canvas[y0:y1, x0:x1] = np.maximum(canvas[y0:y1, x0:x1],
-                                      val * blob.astype(np.float32))
+    L_safe = L if L >= 1.0 else 1.0
+    W_safe = W if W >= 1.0 else 1.0
+    inv_L = 1.0 / L_safe
+    inv_W = 1.0 / W_safe
+    # 沿局部 pad×pad 区域逐像素更新 canvas (替代 mgrid+exp+maximum 向量化)
+    for j in range(y0, y1):
+        dy = float(j) - float(cy_i)
+        for i in range(x0, x1):
+            dx = float(i) - float(cx_i)
+            along = (dx * ux_n + dy * uy_n) * inv_L
+            across = (dx * -uy_n + dy * ux_n) * inv_W
+            a4 = along * along
+            a4 = a4 * a4
+            blob = np.exp(-a4 - across * across)
+            v = val * blob
+            if v > canvas[j, i]:
+                canvas[j, i] = v
 
 
 def _plate_centroid(plate, crust, k, r_flat):
@@ -145,6 +168,7 @@ def _classify(pl, cr, ag2d, V, r, T):
     spd = np.zeros((T, T), np.float32)
 
     def put(mk, sel, cell):
+        """把选中的像素写回对应掩膜。"""
         if sel.any():
             out[mk][cell[0][sel], cell[1][sel]] = True
 
@@ -1017,7 +1041,7 @@ def main():
 
     解析 ``--seed / --T`` 执行 :func:`run_plate_sim`，将粗 DEM 与 4 张构造场
     渲染为 5 联预览图保存到 ``terrain/output/plate_sim_preview.png``。
-    薄封装 ``terrain/plate_sim.py`` 以脚本方式运行时经由此入口进入。
+    ``python -m terrain.core.plate_sim`` 以模块方式运行时经由此入口进入。
     """
     import os
     import argparse

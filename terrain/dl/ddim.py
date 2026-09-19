@@ -37,6 +37,7 @@ class DDIM:
     def __init__(self, n_train_steps: int = 1000, n_sample_steps: int = 50,
                  beta_start: float = 1e-4, beta_end: float = 2e-2,
                  eta: float = 0.0, device: torch.device | str = "cpu"):
+        """初始化 DDIM 采样器：预计算 ᾱ 调度并生成降序采样子序列。"""
         self.n_train = n_train_steps
         self.n_sample = n_sample_steps
         self.eta = eta

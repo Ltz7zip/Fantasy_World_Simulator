@@ -13,17 +13,17 @@ visualize_context.py — 基于 WorldGeoContext 的地形可视化工具
 
 CLI 使用示例：
   # 1) 最简：seed1 的 2048 默认图
-  python terrain/visualize_context.py
+  python -m terrain.core.visualize_context
 
   # 2) 指定 seed/size + 自定义探针点 + 自定义剖面线段
-  python terrain/visualize_context.py --seed 7 --size 2048 \
+  python -m terrain.core.visualize_context --seed 7 --size 2048 \
       --points 30,85,10,5,-20,-140,0,179.9 \
       --profile 50,-5,30,35 \
       --poly 45,5,55,5,55,20,45,20 \
       --output terrain/output/my_world.png
 
   # 3) 内嵌调用（Jupyter/IPython）：返回 Figure 对象自行保存
-  from terrain.visualize_context import build_geo_figure
+  from terrain.core.visualize_context import build_geo_figure
   fig, axes = build_geo_figure(seed=1, size=2048)
   fig.show()
 =============================================================
@@ -114,6 +114,7 @@ _GEO_COLORS = [
 
 
 def make_geozone_norm_and_cmap():
+    """构建地理分区色卡与边界归一化器，返回 (cmap, norm)。"""
     cmap = ListedColormap(_GEO_COLORS)
     norm = BoundaryNorm(_GEO_BOUNDS, cmap.N)
     return cmap, norm
@@ -207,7 +208,7 @@ def _parse_profile(s: Optional[str]) -> Tuple[Tuple[float, float], Tuple[float, 
 
 def build_geo_figure(
     seed: int = 1,
-    size: int = 2048,
+    size: int = 4096,
     probe_points: Sequence[Tuple[float, float, str]] = (),
     profile: Optional[Tuple[Tuple[float, float], Tuple[float, float]]] = None,
     polygon: Optional[Sequence[Tuple[float, float]]] = None,
@@ -980,6 +981,7 @@ drawProfile();
 
 
 def _build_probe_markers_html(probe_info):
+    """把探针点信息渲染为地图上的标记与名称标签 HTML 字符串。"""
     parts = []
     for p in probe_info:
         px = (p["lon"] + 180.0) / 360.0
@@ -997,6 +999,7 @@ def _build_probe_markers_html(probe_info):
 
 
 def _build_probe_table_rows(probe_info):
+    """把探针点信息渲染为表格行 HTML（含海拔/坡度），无探针时给出占位提示行。"""
     rows = []
     for p in probe_info:
         cls = "land" if p["land"] else "sea"
@@ -1015,6 +1018,7 @@ def _build_probe_table_rows(probe_info):
 
 
 def _build_poly_html(polygon_stats):
+    """把多边形统计渲染为概要 pill 与统计网格 HTML，未提供多边形时返回提示文本。"""
     if polygon_stats is None:
         return ("未提供 --poly",
                 '<div style="color:var(--muted);text-align:center;padding:20px 8px">'
@@ -1180,7 +1184,7 @@ def export_html_report(
     dem_path = os.path.join(_THIS_DIR, "output", f"seed{seed}_dem.npy")
     if not os.path.exists(dem_path):
         dem_path = os.path.join(_THIS_DIR, "output", "world_dem.npy")
-    cmd = (f"python terrain/visualize_context.py "
+    cmd = (f"python -m terrain.core.visualize_context "
            f"--seed {seed} --size {S} --html")
 
     # —— 组装 HTML ——
@@ -1212,6 +1216,7 @@ def export_html_report(
 
     # —— 写入 ——
     def _save(p):
+        """把 HTML 内容写入路径 p。"""
         with open(p, "w", encoding="utf-8") as fh:
             fh.write(html_out)
     try:
@@ -1300,7 +1305,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(
         description="基于 WorldGeoContext 的 4 面板地形可视化工具 + 交互 HTML 报告")
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--size", type=int, default=2048, choices=[2048, 4096])
+    ap.add_argument("--size", type=int, default=4096, choices=[2048, 4096])
     ap.add_argument("--output", type=str, default=None,
                     help="输出 PNG 路径（默认 terrain/output/geoctx_visual_seed{seed}.png）")
     ap.add_argument("--points", type=str, default=None,

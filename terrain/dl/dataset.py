@@ -33,6 +33,7 @@ class DEMTileDataset(Dataset):
 
     def __init__(self, root: Path = DEM_TILES_DIR, size: int = TILE_SIZE,
                  augment: bool = True):
+        """初始化数据集：扫描根目录下全部 .npy 切片。"""
         self.root = Path(root)
         self.files = sorted(glob.glob(str(self.root / "*.npy")))
         if not self.files:
@@ -42,9 +43,11 @@ class DEMTileDataset(Dataset):
         self.augment = augment
 
     def __len__(self) -> int:
+        """返回数据集样本数。"""
         return len(self.files)
 
     def __getitem__(self, idx: int) -> torch.Tensor:
+        """加载第 idx 个切片：裁剪/放大、增强、归一化后返回 (1, H, W) 张量。"""
         dem = np.load(self.files[idx]).astype(np.float32)  # (H, W) 米
 
         # 裁剪/放大到目标尺寸

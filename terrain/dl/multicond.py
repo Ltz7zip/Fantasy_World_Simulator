@@ -737,11 +737,13 @@ def encode_multimodal(plate_12ch: np.ndarray,
     cond = cond.to(dev).eval()
 
     def to_t(x):
+        """把 (H,W) 或 (C,H,W) 数组转成 (1,C,H,W) 张量并移到目标设备。"""
         if x.ndim == 2:
             x = x[None]
         return torch.from_numpy(x).float().unsqueeze(0).to(dev)
 
     def to_mask_t(m):
+        """把掩码数组转成 (1,1,H,W) 张量并移到目标设备。"""
         if m.ndim == 2:
             m = m[None]
         return torch.from_numpy(m).float().unsqueeze(0).to(dev)

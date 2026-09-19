@@ -151,7 +151,7 @@ class WorldGeoContext(TerrainDataProtocol):
         raise TypeError("Use WorldGeoContext.from_seed(seed, size) instead.")
 
     @classmethod
-    def from_seed(cls, seed: int = 0, size: int = 2048,
+    def from_seed(cls, seed: int = 0, size: int = 4096,
                   force_reload: bool = False) -> "WorldGeoContext":
         """
         获取或创建全局单例。
@@ -453,6 +453,7 @@ class WorldGeoContext(TerrainDataProtocol):
         S = self.size
 
         def _ll_to_rc(lat_arr, lon_arr):
+            """把纬度/经度数组映射为网格 (row, col) 浮点坐标。"""
             # row = (lat - lat_grid[0]) / dlat 整数化
             dlat = 180.0 / S
             dlon = 360.0 / S
@@ -565,7 +566,7 @@ def _generate_world_safe(seed: int, size: int,
         raise RuntimeError(
             "检测到 generate_world 正在执行中（环境变量锁已占用），"
             "为避免死循环，geo_context 停止自动生成 DEM。"
-            "请先手动运行 `python terrain/generate_world.py --seed {seed} --size {size}`。"
+            "请先手动运行 `python -m terrain.core.generate_world --seed {seed} --size {size}`。"
             .format(seed=seed, size=size))
 
     argv0 = os.path.basename(sys.argv[0]) if sys.argv else ""
@@ -679,7 +680,7 @@ def _point_in_polygon_2d(x: np.ndarray, y: np.ndarray,
 # 模块级便捷函数（省去每次 .from_seed()）
 # ===========================================================================
 
-def get_ctx(seed: int = 0, size: int = 2048) -> WorldGeoContext:
+def get_ctx(seed: int = 0, size: int = 4096) -> WorldGeoContext:
     """返回全局单例的简写。"""
     return WorldGeoContext.from_seed(seed=seed, size=size)
 
@@ -693,10 +694,10 @@ def main():
 
     解析 ``--seed / --size`` 实例化 :class:`WorldGeoContext`，输出
     内存 / 陆地表面积指标，并执行单点查询、多边形区域统计、
-    网格<->经纬度往返一致性自检。薄封装 ``terrain/geo_context.py``
-    以脚本方式运行时，经由此入口进入。
+    网格<->经纬度往返一致性自检。
+    ``python -m terrain.core.geo_context`` 以模块方式运行时，经由此入口进入。
     """
-    # 运行：python terrain/geo_context.py  --seed 1 --size 2048
+    # 运行：python -m terrain.core.geo_context  --seed 1 --size 2048
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, default=1)

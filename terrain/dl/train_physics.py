@@ -50,6 +50,7 @@ class EMA:
     """模型参数指数滑动平均（与 train.py 中一致，独立保留以避免循环依赖）。"""
 
     def __init__(self, model, decay: float = EMA_DECAY):
+        """初始化 EMA：克隆模型可训练参数作为影子权重。"""
         self.decay = decay
         self.shadow = {n: p.detach().clone()
                        for n, p in model.named_parameters() if p.requires_grad}
@@ -57,17 +58,20 @@ class EMA:
 
     @torch.no_grad()
     def update(self, model):
+        """用当前模型参数按指数衰减更新影子权重。"""
         for n, p in model.named_parameters():
             if n in self.shadow:
                 self.shadow[n].mul_(self.decay).add_(p.detach(), alpha=1 - self.decay)
 
     def apply(self, model):
+        """把模型参数临时替换为 EMA 影子权重（备份原参数）。"""
         for n, p in model.named_parameters():
             if n in self.shadow:
                 self.backup[n] = p.data.clone()
                 p.data.copy_(self.shadow[n])
 
     def restore(self, model):
+        """恢复 apply 前备份的原始模型参数。"""
         for n, p in model.named_parameters():
             if n in self.backup:
                 p.data.copy_(self.backup[n])
@@ -86,6 +90,7 @@ def cosine_warmup_lr(step: int, max_steps: int, warmup: int,
 
 
 def amp_enabled() -> bool:
+    """AMP 仅在 CUDA/MPS 启用；CPU 无效。"""
     return USE_AMP and DEVICE.type in ("cuda", "mps")
 
 
@@ -399,6 +404,7 @@ def train_physics(task: str, epochs: int = 50, batch_size: int = BATCH_SIZE,
 # ==================== CLI ====================
 
 def main():
+    """CLI 入口：解析参数并分发到 train_physics。"""
     p = argparse.ArgumentParser(description="阶段 3 物理监督网络训练")
     p.add_argument("--task", type=str, required=True,
                    choices=["river", "snowline", "coast"],

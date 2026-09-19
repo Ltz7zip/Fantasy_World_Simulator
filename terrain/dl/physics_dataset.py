@@ -188,6 +188,7 @@ class _BasePhysicsDataset(Dataset):
 
     def __init__(self, root: Path = DEM_TILES_DIR, size: int = TILE_SIZE,
                  augment: bool = True):
+        """初始化基类：扫描根目录下 .npy/.npz 切片并保存尺寸与增强开关。"""
         self.root = Path(root)
         files = sorted(glob.glob(str(self.root / "*.npy")))
         files += sorted(glob.glob(str(self.root / "*.npz")))
@@ -199,9 +200,11 @@ class _BasePhysicsDataset(Dataset):
         self.augment = augment
 
     def __len__(self) -> int:
+        """返回切片数量。"""
         return len(self.files)
 
     def _load(self, idx: int) -> tuple[np.ndarray, np.ndarray | None]:
+        """加载并裁剪第 idx 个切片，返回 (dem_m, lats or None)。"""
         return _load_tile(self.files[idx], self.size)
 
 
@@ -216,10 +219,12 @@ class RiverDataset(_BasePhysicsDataset):
 
     def __init__(self, root: Path = DEM_TILES_DIR, size: int = TILE_SIZE,
                  augment: bool = True, threshold_quantile: float = 0.995):
+        """初始化河网数据集，保存 D8 流量分位阈值参数。"""
         super().__init__(root, size, augment)
         self.threshold_quantile = threshold_quantile
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """返回 (归一化高程, 河网二值掩码) 张量对。"""
         dem, _ = self._load(idx)
         label = extract_river_label(dem, self.threshold_quantile)
         if self.augment:
@@ -240,9 +245,11 @@ class SnowlineDataset(_BasePhysicsDataset):
 
     def __init__(self, root: Path = DEM_TILES_DIR, size: int = TILE_SIZE,
                  augment: bool = True):
+        """初始化雪线数据集。"""
         super().__init__(root, size, augment)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """返回 (三通道条件, 雪线高程) 张量对。"""
         dem, lats = self._load(idx)
         if lats is None:
             lats = np.zeros(dem.shape[0], dtype=np.float32)
@@ -276,10 +283,12 @@ class CoastDataset(_BasePhysicsDataset):
 
     def __init__(self, root: Path = DEM_TILES_DIR, size: int = TILE_SIZE,
                  augment: bool = True, shelf_depth: float = -2000.0):
+        """初始化海岸线数据集，保存陆架深度参数。"""
         super().__init__(root, size, augment)
         self.shelf_depth = shelf_depth
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """返回 (归一化高程, 三分类标签) 张量对。"""
         dem, _ = self._load(idx)
         label = extract_coast_label(dem, self.shelf_depth)
         if self.augment:

@@ -138,6 +138,7 @@ def make_sample_fn_ldm(vae: TerrainVAE, cond_encoder: ConditionEncoder,
     """
     @torch.no_grad()
     def sample(n: int) -> np.ndarray:
+        """用 EMA 权重做条件/无条件 DDIM 采样并 VAE 解码。"""
         # 用 EMA 权重
         ema_model.apply(model)
         ema_cond.apply(cond_encoder)
@@ -354,6 +355,7 @@ def train_ldm(epochs: int = 200, batch_size: int = BATCH_SIZE,
 # ==================== CLI ====================
 
 def main():
+    """CLI 入口：解析参数并启动 LDM 训练。"""
     p = argparse.ArgumentParser(description="阶段 2 LDM 训练")
     p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--batch-size", type=int, default=BATCH_SIZE)

@@ -48,6 +48,7 @@ class TrainLogger:
 
     def __init__(self, run_name: str, log_dir: Path = LOG_DIR,
                  use_tb: bool = True):
+        """初始化日志记录器：创建日志目录，按环境可用性启用 TensorBoard。"""
         self.run_name = run_name
         self.log_dir = Path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
@@ -97,6 +98,7 @@ class TrainLogger:
 
     # ---------- 直方图 ----------
     def log_histogram(self, tag: str, values, step: int) -> None:
+        """记录直方图到 TensorBoard（环境不支持时静默跳过）。"""
         if self.tb is None:
             return
         import torch
@@ -106,6 +108,7 @@ class TrainLogger:
 
     # ---------- 文本 ----------
     def log_text(self, tag: str, text: str, step: int) -> None:
+        """记录文本：写 TensorBoard 并追加到同名 .log 文件。"""
         if self.tb is not None:
             self.tb.add_text(tag, text, step)
         # 同时追加到 CSV 旁边的 .log 文本文件
@@ -113,6 +116,7 @@ class TrainLogger:
             f.write(f"[step={step}] {text}\n")
 
     def close(self) -> None:
+        """关闭 TensorBoard writer，刷新未写入的事件。"""
         if self.tb is not None:
             self.tb.close()
 

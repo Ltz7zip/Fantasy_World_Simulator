@@ -29,7 +29,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-# 确保能 import terrain_engine (与 test_visualize_context.py 同套路)
+# 确保 core/ 在 sys.path 中（terrain.core.* 可裸导入）
 import os
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _TERRAIN_DIR = os.path.dirname(_HERE)

@@ -25,6 +25,7 @@ class ResBlock(nn.Module):
     """GroupNorm + SiLU + Conv ×2 + 残差。"""
 
     def __init__(self, c_in: int, c_out: int, groups: int = 8):
+        """初始化残差块，构建两层 GroupNorm+SiLU+Conv 与跳跃连接。"""
         super().__init__()
         g1 = _pick_groups(c_in, groups)
         g2 = _pick_groups(c_out, groups)
@@ -35,6 +36,7 @@ class ResBlock(nn.Module):
         self.skip = nn.Conv2d(c_in, c_out, 1) if c_in != c_out else nn.Identity()
 
     def forward(self, x):
+        """前向：x 经两层卷积后加残差返回。"""
         h = F.silu(self.norm1(x))
         h = self.conv1(h)
         h = F.silu(self.norm2(h))
@@ -56,6 +58,7 @@ class TerrainVAE(nn.Module):
     """
 
     def __init__(self, in_ch: int = 1, latent_ch: int = 4, base: int = 64):
+        """初始化 VAE：构建编码器、潜变量头与解码器。"""
         super().__init__()
         # Encoder: 256 -> 128 -> 64 -> 32
         self.enc = nn.Sequential(
@@ -90,17 +93,21 @@ class TerrainVAE(nn.Module):
         )
 
     def encode(self, x):
+        """编码：返回 (均值, log方差) 潜变量图。"""
         h = self.enc(x)
         return self.conv_mu(h), self.conv_logvar(h)
 
     def reparam(self, mu, logvar):
+        """重参数化采样：mu + std·ε。"""
         std = torch.exp(0.5 * logvar)
         return mu + std * torch.randn_like(std)
 
     def decode(self, z):
+        """解码：潜变量 z 重建为像素空间。"""
         return self.dec(self.dec_in(z))
 
     def forward(self, x):
+        """前向：编码→重参数化→解码，返回 (重建, mu, logvar)。"""
         mu, logvar = self.encode(x)
         z = self.reparam(mu, logvar)
         return self.decode(z), mu, logvar

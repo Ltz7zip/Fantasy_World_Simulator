@@ -593,6 +593,7 @@ class LargeScaleInference:
 
         # 单块生成函数（闭包，复用 ldm）
         def generate_tile(cond_tile: np.ndarray) -> np.ndarray:
+            """单块生成函数：复用 ldm 生成一个瓦片的 DEM。"""
             return self.ldm.generate(cond_tile, seed=None,
                                      tile_size=self.tile_size)
 

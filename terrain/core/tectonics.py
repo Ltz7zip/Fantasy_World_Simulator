@@ -92,10 +92,12 @@ def download_tectonic(dest=None):
 
 
 def _load_boundary_points(path):
+    """从 GeoJSON 边界文件提取板块边界采样点，返回 (N,3) 数组 [lat, lon, grp]。"""
     js = json.load(open(path, "r", encoding="utf-8"))
     chunks = []
 
     def add_line(coords, grp):
+        """把一条 LineString 坐标按约 7km 步长插值采样为点序列。"""
         co = np.asarray(coords, np.float64)
         if len(co) < 2:
             return
@@ -135,6 +137,7 @@ class TectField:
     - patch 对任意 y0/x0/size 安全(裁剪+边缘填充兜底)"""
 
     def __init__(self, ny, nx, bjson=None, dem_for_proxy=None, cache=None):
+        """``__init__``: 构建或从缓存加载 4 通道全球构造条件场，异常时自动重算。"""
         shp = ((ny + _DS - 1) // _DS, (nx + _DS - 1) // _DS)
         src = "bird" if bjson else "proxy"
         cache = cache or os.path.join(_DIR, "cache", f"tect_cache_{ny}x{nx}_{src}.npz")
@@ -186,6 +189,7 @@ class TectField:
                 print(f"  缓存写入失败(不影响运行): {e}")
 
     def patch(self, y0, x0, size):
+        """裁剪放大出 (y0,x0) 处 size×size 的构造场块，越界时边缘填充兜底。"""
         ny8, nx8 = self.ch.shape[1:]
         c0y = y0 // _DS
         c0x = x0 // _DS

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-test_visualize_context.py — terrain/visualize_context.py 单元测试
+test_visualize_context.py — terrain/core/visualize_context.py 单元测试
 
 覆盖范围（按用户要求的重点）：
   A. CLI 参数解析（_parse_points / _parse_poly / _parse_profile 及其异常路径）

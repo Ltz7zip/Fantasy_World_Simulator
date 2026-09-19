@@ -49,6 +49,7 @@ class ConditionEncoder(nn.Module):
 
     def __init__(self, in_ch: int = 12, cond_ch: int = 4, base: int = 64,
                  ch_stats: dict | None = None):
+        """初始化条件编码器：注册输入归一化统计并构建下采样编码主干。"""
         super().__init__()
         self.in_ch = in_ch
         self.cond_ch = cond_ch

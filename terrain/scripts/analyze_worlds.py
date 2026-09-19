@@ -73,6 +73,7 @@ def label_periodic(mask):
     parent = list(range(n + 1))
 
     def find(a):
+        """并查集查找根节点（带路径压缩）。"""
         while parent[a] != a:
             parent[a] = parent[parent[a]]
             a = parent[a]
@@ -122,6 +123,7 @@ def block_mean_to(a, ny, nx):
     """任意尺寸栅格 → ny×nx 块均值 (行/列 reduceat)"""
     a = a.astype(np.float64)
     def red(x, nbins, axis):
+        """沿指定轴把 x 均分成 nbins 段并做块均值。"""
         b = np.linspace(0, x.shape[axis], nbins + 1).round().astype(int)
         s = np.add.reduceat(x, b[:-1], axis=axis)
         c = np.diff(b).astype(np.float64)
@@ -161,6 +163,7 @@ def load_earth_conv():
     pts = []
 
     def add_line(coords):
+        """把一条折线按经度解绕 + 加密采样为点列，追加到 pts。"""
         co = np.asarray(coords, np.float64)
         if len(co) < 2:
             return
@@ -211,6 +214,10 @@ def sim_conv(seed):
 
 # ---------- 主分析 ----------
 def analyze(name, dem, conv):
+    """对单个世界（name 标识）计算七大地理维度统一指标，返回指标字典 r。
+
+    覆盖: 基础/尺度、地形地貌、海岸与岛屿、海洋地理、水系水文、
+    气候-植被、板块构造耦合（conv 为俯冲/碰撞距离场，可为 None）。"""
     lats = LATS
     coslat = np.clip(np.cos(np.deg2rad(lats)), 0.0, 1.0)
     Wm = coslat[:, None].astype(np.float64)
@@ -363,6 +370,7 @@ def analyze(name, dem, conv):
 
 
 def main():
+    """入口: 分析真实地球 + seed1..10 生成图, 写 analysis_results.json, 打印汇总表。"""
     results = {}
     print("加载真实地球 ETOPO1 ...")
     earth = load_earth()

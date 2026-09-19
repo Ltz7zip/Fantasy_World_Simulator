@@ -24,6 +24,7 @@ class LatentBlock(nn.Module):
     """潜空间卷积块：GroupNorm + SiLU + Conv + 时间调制 + Conv + 残差。"""
 
     def __init__(self, c_in: int, c_out: int, time_dim: int, groups: int = 8):
+        """初始化潜空间卷积块，构建两层卷积、时间调制 MLP 与残差跳跃连接。"""
         super().__init__()
         g1 = _pick_groups(c_in, groups)
         g2 = _pick_groups(c_out, groups)
@@ -35,6 +36,7 @@ class LatentBlock(nn.Module):
         self.skip = nn.Conv2d(c_in, c_out, 1) if c_in != c_out else nn.Identity()
 
     def forward(self, x, t_emb):
+        """前向：x 经归一化卷积与时间调制后加残差返回。"""
         h = F.silu(self.norm1(x))
         h = self.conv1(h)
         h = h + self.time_mlp(F.silu(t_emb))[:, :, None, None]
@@ -51,6 +53,7 @@ class CrossAttention(nn.Module):
 
     def __init__(self, channels: int, cond_channels: int, heads: int = 4,
                  head_dim: int = 32):
+        """初始化 cross-attention 层，构建 Q/K/V 投影与输出投影。"""
         super().__init__()
         inner = heads * head_dim
         self.heads = heads
@@ -92,6 +95,7 @@ class LatentDiffusionUNet(nn.Module):
 
     def __init__(self, in_ch: int = 4, cond_ch: int = 4, base: int = 128,
                  time_dim: int = 128, use_cross_attn: bool = True):
+        """初始化潜空间条件去噪 U-Net：构建编码器/瓶颈/解码器及可选 cross-attention。"""
         super().__init__()
         self.time = TimeEmbed(time_dim)
         # 输入 = 噪声潜变量 + 条件特征 concat
