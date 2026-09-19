@@ -1228,13 +1228,15 @@ def add_island_arcs(elev_m, tect1_up, cf, rng):
     ---- v7.4: 用户报告"群岛/岛弧数量明显不足"
       俯冲核带分位: 0.995 → 0.990 (放宽准入, 中等强度的俯冲带也能产生岛弧)
       核带最低阈值: 0.25 → 0.18 (进一步降低门槛, 生成 ~2倍 的岛弧链)
-      盖章深度下限: -5200m → -5800m (也能在较深盆地边缘盖岛弧, 类似马里亚纳外侧弧形群岛)"""
+      盖章深度下限: -5200m → -5800m (也能在较深盆地边缘盖岛弧, 类似马里亚纳外侧弧形群岛)
+    ---- v34: 上游造陆量瘦身回调 (ocean_-200_0 / lake_share 偏高, 被校准淹没成浅海)
+      核带分位回 0.985、最低阈值回 0.25、盖章深度回 -5200m → 岛弧链明显减少"""
     from scipy.ndimage import label as ndi_label
     S = elev_m.shape[0]
-    thr = float(np.quantile(tect1_up, 0.990))
+    thr = float(np.quantile(tect1_up, 0.985))
     if thr <= 0:
         return elev_m
-    core = tect1_up > max(thr, 0.18)
+    core = tect1_up > max(thr, 0.25)
     lab, n = ndi_label(core)
     if n == 0:
         return elev_m
@@ -1262,7 +1264,7 @@ def add_island_arcs(elev_m, tect1_up, cf, rng):
             if not cands:
                 continue
             _, oy, ox = max(cands)                    # 大陆侧
-            if out[oy, ox] >= 0.0 or out[oy, ox] < -5800.0:
+            if out[oy, ox] >= 0.0 or out[oy, ox] < -5200.0:   # v34: -5800→-5200 减少深盆地岛弧
                 continue                              # 只要浅海盖章
             ang = rng.uniform(0, 2 * np.pi)           # 岛长轴随机倾斜
             tx, ty = -ny_, nx_
@@ -1288,7 +1290,7 @@ def add_hotspot_chains(elev_m, rng, n_chains=None):
     S = elev_m.shape[0]
     land = elev_m > 0
     d_land = distance_transform_edt(~land)
-    n_chains = n_chains if n_chains is not None else int(rng.randint(5, 10))  # v7.4: 3-7 → 5-10, 匹配地球西太平洋海量岛弧密度
+    n_chains = n_chains if n_chains is not None else int(rng.randint(2, 4))  # v34: 3-6 → 2-4 减少热点碎岛
     out = elev_m.copy()
     placed, tries = 0, 0
     while placed < n_chains and tries < 300:
@@ -1300,7 +1302,7 @@ def add_hotspot_chains(elev_m, rng, n_chains=None):
         placed += 1
         ang = rng.uniform(0, 2 * np.pi)
         dy, dx = np.sin(ang), np.cos(ang)
-        n_isl = int(rng.randint(3, 7))
+        n_isl = int(rng.randint(3, 5))   # v34: 3-7 → 3-5 单链岛数微减
         gap = rng.uniform(4.0, 8.0)
         H0 = rng.uniform(900.0, 1600.0)
         for j in range(n_isl):
@@ -1440,7 +1442,9 @@ def add_shelf_peninsulas(elev_m, margin_up, cf, rng, lats=None,
 
 def add_coral_reefs(elev_m, lats, rng, temp_fn=None, n_reef=None):
     """M3 珊瑚礁带 (马尔代夫/太平洋环礁型): |lat|<28° 浅海(-60~0m)
-    且海表温度>20°C 处, 低概率抬升小岛 (峰3-8m, r=1-2px, 群集3-8个)。"""
+    且海表温度>20°C 处, 低概率抬升小岛 (峰3-8m, r=1-2px, 群集3-8个)。
+    v33: 减量 (420→160 簇, 簇内 3-8→2-4) —— 旧版在每片热带浅海制造上千个
+    1-2px 微岛, 与陆架色带叠加呈 "陨石坑同心圆" 碎点, 而非地球的礁带."""
     S = elev_m.shape[0]
     sea_shallow = (elev_m > -60.0) & (elev_m <= 0.0) \
                   & (np.abs(lats)[:, None] < 28.0)
@@ -1450,12 +1454,12 @@ def add_coral_reefs(elev_m, lats, rng, temp_fn=None, n_reef=None):
     if ys.size == 0:
         return elev_m
     out = elev_m.copy()
-    n_reef = n_reef if n_reef is not None else int(min(ys.size * 0.012, 420))
+    n_reef = n_reef if n_reef is not None else int(min(ys.size * 0.004, 120))  # v34: 0.005/160 → 0.004/120
     # 礁盘中心: 稀疏采样 + 群集
     pick = rng.choice(ys.size, size=min(n_reef, ys.size), replace=False)
     for p in pick:
         cy, cx = int(ys[p]), int(xs[p])
-        n_isl = int(rng.randint(3, 9))
+        n_isl = int(rng.randint(2, 5))
         for _ in range(n_isl):
             oy = int(round(cy + rng.normal(0, 3.5)))
             ox = int(round(cx + rng.normal(0, 3.5))) % S
@@ -1496,7 +1500,7 @@ def add_intraplate_orogen(elev_m, cf, tect1_up, rng, n=None):
         ang = rng.uniform(0, np.pi)
         L = rng.uniform(20.0, 45.0)
         W = rng.uniform(4.0, 9.0)
-        H = rng.uniform(1600.0, 3400.0)
+        H = rng.uniform(900.0, 1900.0)   # v38: 1600-3400→900-1900 (板内山不再抢攻高山位)
         ux, uy = np.cos(ang), np.sin(ang)
         pad = int(L) + 4
         yy, xx = np.mgrid[max(0, cy - pad):min(S, cy + pad + 1),
@@ -1868,9 +1872,12 @@ def classify_landforms(dem_m, lats, land=None,
 
 # ==================== 9d. M5 克拉通大流域盆地 ====================
 def add_craton_basins(dem, conv, rng, belt=None, lats=None,
-                      max_exo=4, endorheic=True,
+                      max_exo=4, max_endo=1, endorheic=True,
+                      precip=None, endo_p_max=800.0,
                       target_lo=0.020, target_hi=0.065,
-                      min_share=0.015):
+                      min_share=0.015,
+                      dyke_coast_excl=40.0, dyke_height=250.0,
+                      basin_max_share=0.10):
     """M5 克拉通大流域盆地 (亚马逊/刚果/西西伯利亚型):
     稳定陆内低地(低起伏·低收敛·|lat|<72°)重塑为向单一出口的线性倾斜面:
       z = z_out + (z_far−z_out)·(d/d_max) + fBm微起伏(±18m, 远端减半)
@@ -1883,7 +1890,16 @@ def add_craton_basins(dem, conv, rng, belt=None, lats=None,
     ---- v7.4: 用户报告"内陆湖/内流盆地数量明显不足, 湖泊巨型化"
       max_exo: 2→4 (允许最多4个外流大盆地, 对应地球 亚马逊/刚果/密西西比/拉普拉塔 4大流域)
       target_lo: 0.032 → 0.020 (最小目标份额从3.2%降到2.0%, 允许更多中小型盆地生成,
-      不再强求单一大盆地挤到 3.2% 陆地面积, 更像地球 里海/咸海/乍得湖 多种尺度并存)"""
+      不再强求单一大盆地挤到 3.2% 陆地面积, 更像地球 里海/咸海/乍得湖 多种尺度并存)
+    ---- v34: 内流盆地干旱门控 (用户报告"巨大内流区违背水文学常识")
+      地球内流区 (~18% 陆地) 几乎全部位于干旱区 (里海/乍得/塔里木), 湿润区
+      封闭盆地必然溢流切出外流河道. 新增:
+        max_endo : 内流盆地数量上限 (默认1, 里海型)
+        precip   : 降水场 (mm/yr, 与 dem 同尺寸); 提供了时内流盆地拒建
+                   在平均降水 > endo_p_max (默认 800mm) 的湿润封闭盆地,
+                   改为维持自然排水 (由后续河道自然外流), 消除"绿水巨湖".
+      max_exo=3 让多个大流域各自拥有外流出口, 而非仅最大一个.
+    """
     S, W = dem.shape
     land = dem > 0
     n_land = int(land.sum())
@@ -1980,8 +1996,16 @@ def add_craton_basins(dem, conv, rng, belt=None, lats=None,
                 ys, xs = np.nonzero(near)
                 k = int(np.argmin(dem[ys, xs]))
                 oy, ox = int(ys[k]), int(xs[k])
-                mode = 'exo'
-            elif endorheic and n_endo == 0:
+                mode = 'exo' if n_exo < max_exo else None
+                # 外流名额用尽 → 若无缘出口则放弃该候选 (不占用内流名额)
+                if mode is None:
+                    continue
+            elif endorheic and n_endo < max_endo:
+                # ---- v34: 内流盆地干旱门控 ----
+                # 湿润封闭盆地 (平均降水 > endo_p_max) 不建内流巨型湖 —
+                # 现实中湿润盆地必溢流切出外流河道 (河流改道/被袭夺)
+                if precip is not None and float(np.mean(precip[mask])) > endo_p_max:
+                    continue
                 ys, xs = np.nonzero(mask)
                 k = int(np.argmin(dem[ys, xs]))
                 oy, ox = int(ys[k]), int(xs[k])
@@ -2004,7 +2028,19 @@ def add_craton_basins(dem, conv, rng, belt=None, lats=None,
             if mode == 'exo':
                 # v27: 1200px mask — 更大流域面积, 提升最大流域占比.
                 # mask 仅含陆地, 不产生圆形海洋高原.
+                # ===== v37: 面积上限 basin_max_share (默认 10% 陆地) =====
+                # 诊断 (3D 模型反馈 + 定量): 原 1200px 膨胀让单一外流盆地覆盖
+                # 60% 陆地 (几乎整块大陆), 半径 1000px+ 的环形堤坝因围绕整条
+                # 海岸线而成为"全球边缘山脉环"→ 大陆成巨碗(内陆积水成海).
+                # 地球最大流域 (亚马逊) 仅约 3.9% 陆地: 按目标份额限制 mask
+                # 半径——保留距出口最近的 basin_max_share(=10%) 陆地, 使多个
+                # 中型盆地并立、各自独立排海, 而非一个吞并全大陆的超级碗.
                 mask = (d_o <= 1200.0) & land
+                if mask.sum() > basin_max_share * n_land:
+                    _o_srt = d_o[land]
+                    _need = basin_max_share * n_land
+                    _rmax = float(np.partition(_o_srt, int(_need))[int(_need) - 1])
+                    mask = mask & (d_o <= _rmax)
                 if mask.sum() < min_share * n_land:
                     continue
             # d_in: 掩模内距边界 (0 外, 正内) — distance_transform_edt(mask) 计算每个 mask 内像素到最近 mask 外像素的距离
@@ -2021,6 +2057,8 @@ def add_craton_basins(dem, conv, rng, belt=None, lats=None,
             if dmax < 20:
                 continue
             # v27: z_far 上限 1500m — mask 仅含陆地, 抬升陆地不会产生圆形海洋高原.
+            # (v38 曾试 950/1.0/t^0.3 缓坡盆地 → mean_land_slope 无变化,
+            #  河流收敛反弱, 已回退)
             z_far = min(max(float(np.quantile(dem[mask], 0.60)), z_ring), 1500.0)
             z_out = float(dem[oy, ox]) if mode == 'exo' else -28.0
             # v27: 坡度保底 2.0 m/px — 强坡度确保水流直达出口
@@ -2030,6 +2068,13 @@ def add_craton_basins(dem, conv, rng, belt=None, lats=None,
             # 坡度覆盖: 仅限 mask 内部 (避免相邻盆地出口互相覆盖抬升)
             # 海岸带由深宽河道走廊引导水流至出口
             w = mask.astype(np.float32)
+            # v37: 海岸锥减 — 距海 40px 内坡面权重归零, 90px 外全量.
+            # 修复倾斜面远端点 (t→1, z_b≈z_far 最高 1500m) 落在海岸线时,
+            # 海岸带被抬成数百米台地 (用户所见"边缘山脉环"的另一来源).
+            # 地球实测 (ETOPO1 2048 口径): 0-5px 84m / 5-15px 266m —— 海岸带
+            # 应基本保持低地. 出口走廊 (d_o≤60) 豁免.
+            _wc = np.clip((d_sea_full - 40.0) / 50.0, 0.0, 1.0).astype(np.float32)
+            w = w * np.maximum(_wc, ((d_o <= 60.0) & land).astype(np.float32))
             # v26: 保存海洋像素原始高程 — 坡度不抬升海底, 确保出口连通海洋
             dem_ocean_save = dem.copy()
             rel = 0.2 * _lowres_fbm(S, 60.0, 2, rng=rng)     # 极弱长波起伏 (±0.2m)
@@ -2050,13 +2095,26 @@ def add_craton_basins(dem, conv, rng, belt=None, lats=None,
             # 水流通过自然海岸出口排入海洋, 无需人工阻挡海洋侧漏.
             # v27: 分水岭筑堤 — mask 外缘 30px 环带 (含海洋) 抬升至 z_far+350m,
             # 阻断 D8 边界漏水. 用 fBm 扰动环带距离使堤坝边界自然不规则.
+            # ===== v37 重构: 海岸不筑堤 + 堤高降为 z_far+80 =====
+            # 诊断 (3D 模型用户反馈"陆地边缘围绕一条山脉 + 陆地中间全是水体",
+            # 定量: 海岸 0-5px 均高 46m → 5-15px 陡升 1328m (边缘山环); 内陆
+            # 巨型闭合洼地占陆地 47.7%, 水位 1301m vs 内陆地形中位 370m → fill
+            # 后 76% 陆地低于湖泊水位; lake_share 0.75 vs 地球 0.33)。根因:
+            # 原堤坝把 mask 外缘(海岸线与近海) 整圈抬到最高 1850m → 每块大陆
+            # 天然成"巨碗"(边缘山脉环 + 内陆洼地), 洼地无低垭口排海 → 内陆海.
+            # 修复: ① 距海 40px 内不筑堤 (海岸/近海无需堤坝, 海面即排水道;
+            # 内陆相邻盆地分水岭仍保留堤坝隔离以防流域互漏);
+            # ② 堤高 z_far+350 → z_far+dyke_height (默认 250m): 仅内陆分水岭
+            # 略高于两侧地形即可引导 D8, 不需要 1800m 人造山脉; ③ 海岸 15-45px
+            # 坡面权重锥减, 远端点 (z_b≈z_far) 不再把海岸抬成台地.
             _dyke_noise = 10.0 * (_lowres_fbm(S, 30.0, 3, rng=rng) - 0.5)
             dyke = (d_to > 0) & (d_to + _dyke_noise <= 30.0)
             if mode == 'exo':
                 dyke &= (d_o > 60.0)                       # 出口走廊豁免
-            low = dyke & (dem < z_far + 350.0)
+            dyke &= land & (d_sea_full > dyke_coast_excl)  # v37: 仅内陆分水岭筑堤
+            low = dyke & (dem < z_far + dyke_height)
             if low.any():
-                ramp2 = (z_far + 350.0) * np.exp(-(d_to - 0.5) / 10.0)
+                ramp2 = (z_far + dyke_height) * np.exp(-(d_to - 0.5) / 10.0)
                 dem = np.maximum(dem, np.where(low, ramp2, -np.inf)).astype(np.float32)
             # v27: 不使用 fill_depressions — 它会把盆地填到堤坝高度, 破坏径向坡度.
             # v26: 已移除河道雕刻 — 雕刻产生的封闭洼地需 fill_depressions 修复,
@@ -2067,9 +2125,9 @@ def add_craton_basins(dem, conv, rng, belt=None, lats=None,
             else:
                 n_endo += 1
             info.append(f"{mode}{mask.sum() / n_land * 100:.1f}%@({oy // f},{ox // f})")
-            if n_exo >= max_exo and (not endorheic or n_endo >= 1):
+            if n_exo >= max_exo and n_endo >= max_endo:
                 break
-        if n_exo + n_endo >= 2:
+        if n_exo + n_endo >= max_exo + max_endo:
             break
     return dem, len(info), "; ".join(info)
 

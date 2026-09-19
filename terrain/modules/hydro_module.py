@@ -1021,7 +1021,8 @@ def paint_rivers_rgb(rgb, acc, land, rng, base_q=0.995,
                      color_riv=np.array([0.10, 0.26, 0.42], np.float32),
                      color_big=np.array([0.08, 0.22, 0.38], np.float32),
                      oxbow_color=np.array([0.07, 0.20, 0.33], np.float32),
-                     confluence_bleed_px=2.2, oxbow=True):
+                     confluence_bleed_px=2.2, oxbow=True, deltas=True,
+                     meander=True, meander_amp=4.0, meander_wl=160.0):
     """v8.3 河流连续蓝度+距离场羽化+交汇色溢+牛轭湖淡染。"""
     H, W = rgb.shape[:2]
     aL = acc[land]
@@ -1041,7 +1042,8 @@ def paint_rivers_rgb(rgb, acc, land, rng, base_q=0.995,
         return rgb
     mask_core_wide = binary_dilation(mask_core, iterations=2) & land
     D_core = distance_transform_edt(~mask_core_wide)
-    W_half = 1.2 + 5.2 * np.power(A_star, 0.50)
+    # v33: 河道加宽 (1.2→1.6 / 5.2→6.5) + 着色加深 → 水系主线更醒目
+    W_half = 1.6 + 6.5 * np.power(A_star, 0.50)
 
     ratio = np.clip(D_core / np.maximum(W_half, 1e-4), 0.0, 2.2)
     river_core = (1.0 - np.clip(ratio, 0, 1) ** 1.85)
@@ -1053,7 +1055,7 @@ def paint_rivers_rgb(rgb, acc, land, rng, base_q=0.995,
     col_s = s[..., None]
     target = (1.0 - col_s) * color_riv.astype(np.float64) + \
         col_s * color_big.astype(np.float64)
-    blend_lv = (0.28 + 0.52 * s)
+    blend_lv = (0.34 + 0.52 * s)
     b_final = (blend_lv * alpha)[..., None]
 
     s_nb_min = minimum_filter(s.astype(np.float32), size=3)
@@ -1097,6 +1099,100 @@ def paint_rivers_rgb(rgb, acc, land, rng, base_q=0.995,
             idx_f = np.where(feather_wide)
             rgb[idx_f] = (rgb[idx_f] * (1.0 - f3[idx_f]) +
                           rgb_s[idx_f] * f3[idx_f])
+
+    # ---- v34b: 渲染端河道蜿蜒 (打破 D8/M5 平行直线河) ----
+    # 诊断: M5 线性倾斜面使流域内 D8 流线全部平行笔直 (sinu 1.00-1.04);
+    #       即使把蜿蜒线雕刻进 DEM, 重跑 fill+D8 后水流仍重新走直线,
+    #       DEM 雕刻无法让 D8 重定向 (河道太窄, 倾斜面坡度占优).
+    # 方案: 不动 DEM, 对已绘制的河网 RGB 图层施加长波横向位移场扭曲
+    #       (波长 ~meander_wl px, 幅度 ~meander_amp px), 使最终画出的
+    #       河流呈自然蜿蜒形态 — 显示层蜿蜒, 与水文学一致.
+    if meander and meander_amp > 0:
+        alpha_a = np.clip(b_final[..., 0], 0.0, 1.0) * land
+        idx2 = np.where(alpha_a > 1e-3)
+        if idx2[0].size:
+            layer = rgb.copy()
+            cc = target[idx2] + G_boost[idx2].reshape(-1, 1) * \
+                np.array([0.0, 1.0, 0.8], dtype=np.float64)
+            layer[idx2] = cc
+            # 长波横向位移场: 双轴正弦乘积 + 斜向低频分量, 归一化到 ±amp
+            yy0 = np.arange(H)[:, None]
+            xx0 = np.arange(W)[None, :]
+            p1 = rng.uniform(0, 6.28)
+            p2 = p1 + 2.1
+            p3 = p1 + 4.2
+            wl1 = meander_wl
+            f_y = (np.sin(2 * np.pi * (yy0 / wl1) + p1)
+                   * np.cos(2 * np.pi * (xx0 / wl1) + p2)
+                   + 0.5 * np.sin(2 * np.pi * ((yy0 + xx0) / (wl1 * 1.7)) + p3)
+                   + 0.3 * np.cos(2 * np.pi * ((yy0 - xx0) / (wl1 * 2.4)) + p1 * 1.7))
+            f_x = (np.cos(2 * np.pi * (yy0 / (wl1 * 0.62)) + p3)
+                   * np.sin(2 * np.pi * (xx0 / (wl1 * 0.62)) + p1)
+                   + 0.5 * np.cos(2 * np.pi * ((yy0 - xx0) / (wl1 * 1.3)) + p2)
+                   + 0.3 * np.sin(2 * np.pi * ((yy0 + xx0) / (wl1 * 2.1)) + p2 * 1.3))
+            wy = meander_amp * f_y / max(float(np.std(f_y)), 1e-8)
+            wx = meander_amp * f_x / max(float(np.std(f_x)), 1e-8)
+            yy = (yy0 + wy).astype(np.float32)
+            xx = (xx0 + wx).astype(np.float32)
+            layer_w = np.empty_like(layer)
+            for ch in range(3):
+                layer_w[..., ch] = map_coordinates(layer[..., ch], [yy, xx],
+                                                   order=1, mode='nearest')
+            alpha_w = map_coordinates(alpha_a, [yy, xx],
+                                      order=1, mode='nearest')
+            a3w = np.clip(alpha_w, 0.0, 1.0)[..., None] * land[..., None]
+            rgb = rgb * (1.0 - a3w) + layer_w * a3w
+
+    # ---- v34: 河口三角洲 (泥沙沉积扇形, 尼罗河/恒河型) ----
+    # 大河口 (acc ≥ q99.99 且邻海) 向海方向绘制扇形冲积扇:
+    #   半径随流量增大 (6~44px), 方向 = -陆地掩膜梯度 (指向开阔海),
+    #   羽化 exp(-(d/R)²) × 方向余弦窗 × 沙色淡染 → 解决"入海口直线戛然而止".
+    if deltas and aL.size >= 100:
+        _sea = ~land
+        mouth_cand = land & (acc >= float(np.quantile(aL, 0.9999)))
+        mouth_raw = mouth_cand & binary_dilation(_sea, iterations=1)
+        if mouth_raw.any() and _sea.any():
+            lab_d, n_d = ndi_label(mouth_raw)
+            if n_d > 0:
+                ys_d, xs_d = np.nonzero(mouth_raw)
+                acc_d = acc[mouth_raw]
+                # 只取流量最大的 60 个河口 (避免小支流入海口噪点)
+                order = np.argsort(acc_d)[::-1][:60]
+                gy, gx = np.gradient(land.astype(np.float32))
+                sand = np.array([0.82, 0.70, 0.48], np.float32)
+                A_REF_D = max(A_REF * 20.0, 10.0)
+                for oi in order:
+                    cy, cx = float(ys_d[oi]), float(xs_d[oi])
+                    iy0, ix0 = int(round(cy)), int(round(cx))
+                    # 开阔海方向 = -(land 梯度) (梯度从海指向陆, 反向即朝海)
+                    uy, ux = -gy[iy0, ix0], -gx[iy0, ix0]
+                    un = np.hypot(uy, ux)
+                    if un < 1e-6:
+                        uy, ux = 0.0, -1.0
+                    else:
+                        uy, ux = uy / un, ux / un
+                    R_d = float(np.clip(
+                        6.0 + 28.0 * np.log(max(acc_d[oi], 1.0))
+                        / np.log(max(A_REF_D, 1.0)), 6.0, 44.0))
+                    y0d, y1d = max(0, int(cy - R_d)), min(H, int(cy + R_d) + 1)
+                    x0d, x1d = max(0, int(cx - R_d)), min(W, int(cx + R_d) + 1)
+                    yy = np.arange(y0d, y1d)
+                    xx = np.arange(x0d, x1d)
+                    Y, X = np.meshgrid(yy, xx, indexing='ij')
+                    dY, dX = Y - cy, X - cx
+                    d2 = np.hypot(dY, dX)
+                    m_sea = _sea[Y, X] & (d2 <= R_d)
+                    if not m_sea.any():
+                        continue
+                    cosang = (dY * uy + dX * ux) / np.maximum(d2, 1e-6)
+                    w_ang = np.clip((cosang + 0.25) / 1.25, 0.0, 1.0) ** 1.6
+                    w_d = np.exp(-(d2 / R_d) ** 2)
+                    idx_dd = np.where(m_sea)
+                    a_dd = (w_d * w_ang)[idx_dd].astype(np.float32) * 0.62
+                    if idx_dd[0].size:
+                        rgb[Y[idx_dd], X[idx_dd]] = (
+                            rgb[Y[idx_dd], X[idx_dd]] * (1.0 - a_dd[:, None])
+                            + sand * a_dd[:, None])
 
     return np.clip(rgb, 0, 1).astype(np.float32)
 

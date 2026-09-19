@@ -22,8 +22,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seeds", type=int, nargs="+", default=list(range(11, 21)))
     ap.add_argument("--tag", type=str, default="v30")
+    ap.add_argument("--dir", type=str, default=None)   # 覆盖 DEM 目录
     a = ap.parse_args()
 
+    datadir = a.dir if a.dir else os.path.join(_DIR, "output")
     results = {}
     print("加载真实地球 ETOPO1 ...")
     earth = load_earth()
@@ -31,11 +33,15 @@ def main():
     results["earth"] = analyze("earth", earth, conv_e)
 
     for seed in a.seeds:
-        p = os.path.join(_DIR, "output", f"seed{seed}_dem.npy")
+        p = os.path.join(datadir, f"seed{seed}_dem.npy")
         if not os.path.exists(p):
             print(f"seed{seed} 缺失, 跳过")
             continue
         dem = np.load(p).astype(np.float32)
+        # 降采样到 2048 (与地球参考/分析管线同分辨率, 消除 4096 网格差异)
+        if dem.shape[0] > 2048:
+            k = dem.shape[0] // 2048
+            dem = dem[:2048 * k, :2048 * k].reshape(2048, k, 2048, k).mean((1, 3))
         try:
             conv = sim_conv(seed)
         except Exception:

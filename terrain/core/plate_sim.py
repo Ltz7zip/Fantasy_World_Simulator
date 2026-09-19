@@ -856,7 +856,7 @@ def run_plate_sim(T=512, seed=0, K=12, n_hs=7,
             if lam[1] < 1.8 ** 2 * max(lam[0], 1e-9):
                 continue                          # blob 碎片(AR<1.8)走向不可靠
             v = vec[:, 1]                         # 主方向
-            fl = 2.5 * np.sqrt(lam[1])
+            fl = 3.0 * np.sqrt(lam[1])            # v34: 2.5→3.0 延长碎片主带 → 更长的连续山链
             frags.append(dict(y=float(ys.mean()), x=float(xs.mean()),
                               ux=float(v[1]), uy=float(v[0]),
                               L=fl,
@@ -874,7 +874,7 @@ def run_plate_sim(T=512, seed=0, K=12, n_hs=7,
                    for cy, cx in stamped):
                 continue
             _stamp_belt(belt, f["y"], f["x"], f["ux"], f["uy"],
-                        max(1.8 * f["L"], 30.0),
+                        max(2.0 * f["L"], 30.0),   # v34: 1.8→2.0 盖章延伸更长
                         float(np.clip(f["W"], 3.5, 5.5)))
             stamped.append((f["y"], f["x"]))
         # M2 端点对端点链式连接 (每碎片最多 2 条):
@@ -895,7 +895,7 @@ def run_plate_sim(T=512, seed=0, K=12, n_hs=7,
                         if best is None or d < best[0]:
                             best = (d, ay, ax, by, bx)
                 dist, ay, ax, by, bx = best
-                if not (6.0 < dist < 90.0):
+                if not (6.0 < dist < 140.0):    # v34: 90→140 允许更长间隙连成巨链
                     continue
                 cux, cuy = (bx - ax) / dist, (by - ay) / dist
                 if (abs(cux * fa["ux"] + cuy * fa["uy"]) < cos50 or
@@ -908,7 +908,7 @@ def run_plate_sim(T=512, seed=0, K=12, n_hs=7,
         pairs.sort(key=lambda p: -p[0])
         deg = [0] * len(frags)
         for score, ai, bi, cux, cuy, dist, my, mx in pairs:
-            if deg[ai] >= 2 or deg[bi] >= 2:
+            if deg[ai] >= 3 or deg[bi] >= 3:   # v34: 2→3 允许多链接 → 长链网络
                 continue
             tmp = np.zeros_like(belt)
             _stamp_belt(tmp, my, mx, cux, cuy,

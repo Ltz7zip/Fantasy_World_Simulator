@@ -256,6 +256,9 @@ def render_world(v01, lats, landS, cmap, rng, tect_ctx=None, *, _profile=False):
     gy, gx = np.gradient(g)
     hs = np.clip(0.88 - 22.0 * (gx + gy), 0.60, 1.15)
     shade = (0.78 + 0.55 * np.clip((v01 - 0.5) / 0.5, 0, 1)) * (0.72 + 0.28 * hs)
+    # v35b: 低地 shade 保底亮度 —— 原公式对低地(v01→0.5)压到 0.76 倍, 叠加暗
+    #      色森林群系后大陆中央呈大片阴影区; 卫星图陆地不暗, 低地保底 0.86
+    shade = np.where(v01 < 0.64, np.maximum(shade, np.float32(0.86)), shade)
     land_rgb = BIOME_COLORS[bi] * shade[..., None]
     _mark("hillshade+biome_color")
     # ---- v7.9: 群系边界颜色软过渡 (修复整数索引导致的方块状硬切换) ----
@@ -347,9 +350,11 @@ def render_world(v01, lats, landS, cmap, rng, tect_ctx=None, *, _profile=False):
         rgb[plateau_m] = rgb[plateau_m] * 0.75 + \
             np.array([0.55, 0.50, 0.42], np.float32) * contour[plateau_m, None] * 0.25
     # 山地 (0): 叠加岩石纹理 (高频噪声)
+    # v33: 斑块 fBm 混入脊状噪声 (ridged) → 山脉呈连续脊线而非"石头疮斑"
     if mtn_m.any():
-        rock = _lowres_fbm(S, base_freq=40.0, octaves=3, gain=0.5, rng=rng)
-        rock = np.clip(rock + 0.5, 0, 1)
+        rock = 0.55 * _lowres_fbm(S, 40.0, 3, rng=rng) + \
+            0.45 * ridged_fbm(S, 18.0, 3, rng=rng)
+        rock = np.clip(rock + 0.35, 0, 1)
         rgb[mtn_m] = rgb[mtn_m] * 0.65 + \
             np.array([0.40, 0.36, 0.32], np.float32) * rock[mtn_m, None] * 0.35
     # ---- v7.8 新增子类纹理 ----
@@ -420,9 +425,82 @@ def render_world(v01, lats, landS, cmap, rng, tect_ctx=None, *, _profile=False):
             rgb[lo_h] = rgb[lo_h] * 0.85 + \
                 np.array([0.50, 0.55, 0.30], np.float32) * 0.15
     _mark("landform_textures")
+    # v35b: 陆地区域暗部补光 + 最低明度钳制 (消除"大陆中央阴影/污渍斑块")
+    # 诊断: 陆地亮度下尾过长 (p10 0.28-0.36, p25≈0.40, 地球卫星陆地暗部 >0.45);
+    # 沙丘条纹/高原等高线/山地岩石等暗色纹理叠加在低地底图上产生大片暗褐斑块.
+    # 解法: ① 对明度<0.55 陆地像素补光 (暗部最多+45%); ② 非水陆地明度钳制 ≥0.42
+    #      (保持色调比例伸缩), 压缩明暗断裂 → 连续明亮的陆地 (湖/冰/雪线后续覆盖).
+    _m_dark_ = rgb.max(-1).astype(np.float32)
+    _darkw_ = np.clip((0.55 - _m_dark_) / 0.55, 0.0, 1.0) * land
+    if _darkw_.any():
+        rgb = np.clip(rgb * (1.0 + 0.45 * _darkw_[..., None]), 0.0, 1.0).astype(np.float32)
+    _m_lo_ = rgb.max(-1)
+    _kk_ = np.where(land & (_m_lo_ < 0.42), 0.42 / np.maximum(_m_lo_, 1e-3), 1.0)
+    if (_kk_ != 1.0).any():
+        rgb = np.clip(rgb * _kk_[..., None], 0.0, 1.0).astype(np.float32)
+    _mark("land_dark_lift")
     # 湖泊: 填洼面与实际地形之差 → 湖面 (盆地积水)
     filled = fill_depressions(v01)
-    lake = land & ((filled - v01) > 0.012)
+    lake = land & ((filled - v01) > 0.018)   # v35c: 阈值 0.012→0.018 (≈28m) 减少碎湖
+    # v35: 巨型 fill 水面 → 内流盐沼/干湖床 (不涂蓝)
+    # 诊断 (seeds 32-36/50-52 实测): fill_depressions 会把大陆中心大片闭合洼地
+    # 整体填入水面 (最大单体占陆地 15-52% vs 地球里海级 6%, inland_share 54-74%
+    # vs 地球 24%)。真实地球上不存在占陆地 >6% 的内陆湖 —— 巨型闭合低地底部
+    # 是干盐沼/冲积平原 (乌尤尼盐沼/塔里木盆地), 而非整片水域。因此:
+    #   单体 >6% 陆地 → 渲染为盐沼白(内流干湖床), 不涂蓝;
+    #   ≤6% 的 (里海/维多利亚级) 保留真实湖泊渲染.
+    if lake.any():
+        from scipy.ndimage import label as _ndl_v35, binary_dilation as _bdl_v35
+        _lab_v, _n_v = _ndl_v35(lake)
+        _sz_v = np.bincount(_lab_v.ravel())
+        _sz_v[0] = 0
+        _land_n_v = int(land.sum())
+        _cut_v = _land_n_v * 0.06
+        big_dep = np.zeros_like(lake)
+        for _bi in range(1, _n_v + 1):
+            if _sz_v[_bi] > _cut_v:
+                big_dep |= (_lab_v == _bi)
+        if big_dep.any():
+            # 盐沼色: 以干盐壳白为主导 (乌尤尼式亮白盐壳), 只叠少量原底色纹理
+            # v35b: 原实现 rgb*0.38 把大片区域压暗 → 大陆中央"阴影"; 盐沼应亮
+            # v35d: salt = fbm*1.1+0.62, clip 下界 0.2 → fbm 低处出现 (0.16,0.15,0.13)
+            #       暗灰蓝"污渍"(诊断色 0.29,0.34,0.33 吻合). 钳制 0.60-0.96,
+            #       纹理保持温和起伏但永不发暗 (盐壳总近乎白).
+            salt = np.clip(_lowres_fbm(S, 28, 3, rng=rng) * 0.35 + 0.80, 0.60, 0.96)
+            salcol = np.array([0.93, 0.88, 0.76], np.float32)
+            rgb[big_dep] = (salcol * (0.88 * salt[big_dep, None])
+                            + np.maximum(rgb[big_dep], 0.35) * 0.12)
+            # 边缘过渡带: 盐沼周缘弱化, 避免生硬分界
+            _ring = _bdl_v35(big_dep, iterations=3) & land & ~big_dep
+            if _ring.any():
+                rgb[_ring] = (rgb[_ring] * 0.80
+                              + salcol * (0.45 * salt[_ring, None]) * 0.20)
+            # 湖内孤立高地保持原色 (盐沼中的"岛山")
+            print(f"      [v35] 巨型内流水域盐沼化: {int(big_dep.sum())}px "
+                  f"({big_dep.sum()/max(_land_n_v,1)*100:.1f}% 陆地)")
+        lake = lake & ~big_dep
+        # v35c: 湖面积预算 — 只渲染合计 ≤5% 陆地 的最大的湖
+        # 诊断: 盐沼化后仍剩 11-23% 陆地是涂蓝碎湖 (3000+ 个分量, 20-30m 浅洼),
+        # 在渲染图上呈大片深蓝"污渍"(地球湖泊+内海 ~5%). 超过预算的碎湖不涂蓝
+        # (显示为低地陆地).
+        if lake.any():
+            _lab2, _n2 = _ndl_v35(lake)
+            _sz2 = np.bincount(_lab2.ravel()); _sz2[0] = 0
+            _budget = int(_land_n_v * 0.05)
+            _keep2 = np.zeros_like(lake)
+            _used = 0
+            for _ci in (np.argsort(_sz2[1:])[::-1] + 1):
+                _sd = int(_sz2[_ci])
+                if _used + _sd <= _budget:
+                    _keep2 |= (_lab2 == _ci)
+                    _used += _sd
+                if _used >= _budget:
+                    break
+            if int((lake & ~_keep2).sum()) > 0:
+                print(f"      [v35c] 碎湖预算截断: 保留 {_used}px "
+                      f"({_used/max(_land_n_v,1)*100:.1f}% 陆地), 丢弃 "
+                      f"{int((lake & ~_keep2).sum())}px")
+            lake = _keep2
     rgb[lake] = rgb[lake] * 0.25 + np.array([0.12, 0.30, 0.46], np.float32) * 0.75
     # 河流: 填洼气候加权流累积 → 可见河道 (水量=降水权重×融雪门控)
     # v8.1: 水源按降水权重+融雪门控 (气候加权 acc), 干流宽度直接由水量决定
@@ -430,7 +508,8 @@ def render_world(v01, lats, landS, cmap, rng, tect_ctx=None, *, _profile=False):
     #       → 中段适中 → 河口粗深蓝(s大, 宽, 全覆深蓝); 软边消除像素锯齿
     acc = climate_flow_accumulation(filled, P, T, rng)
     _mark("fill+climate_flow_accumulation")
-    rgb = paint_rivers_rgb(rgb, acc, land, rng, base_q=0.995)
+    # v33: 0.995 → 0.985 让支流也可见, 消除"无源之水"感 (0.5% 分位稀疏不足以呈现水系骨架)
+    rgb = paint_rivers_rgb(rgb, acc, land, rng, base_q=0.985)
     _mark("paint_rivers_rgb")
     # 雪线: 纬度雪线(干旱抬升) ∪ 温度场雪线(年均温≤-12°C 常年积雪, 连续过渡)
     # v7.2: dry 先 σ=2.0 高斯再进入雪线抬升公式, 切断 "P条带 → dry条带 → 雪线条带" 的三级拍频链
@@ -444,10 +523,25 @@ def render_world(v01, lats, landS, cmap, rng, tect_ctx=None, *, _profile=False):
     alpha = alpha * (0.35 + 0.65 * rs)
     # 极地冰盖：>65° 陆地强制全覆盖（模拟南极/格陵兰冰盖，在 rs 之后不被削弱）
     # 65°≈南极圈，地球南极大陆几乎全部在此纬度以南被冰盖覆盖
-    polar_ice = (np.abs(lats)[:, None] > 65.0) & land
-    alpha = np.maximum(alpha, polar_ice.astype(np.float32))
+    # v33: 硬阈值改 64°→66.5° 渐变斜升 (原来 >65° 一刀切 → 与下方植被带呈突兀直边)
+    _ice_ramp = np.clip((np.abs(lats)[:, None] - 64.0) / 2.5, 0.0, 1.0)
+    polar_ice = (_ice_ramp * land).astype(np.float32)
+    alpha = np.maximum(alpha, polar_ice)
     a3 = alpha[..., None]
     rgb = rgb * (1 - a3) + np.array([0.96, 0.97, 0.99])[None, None, :] * a3
+    # v34: 冰盖融水水系 (南极/格陵兰型) — 冰盖下暗河 + 边缘融水辫状河.
+    # 在冰盖着色之后重绘融水河道 → 白色冰盖上出现深蓝融水线条,
+    # 冰盖边缘 (58-78°) 过渡带也可见, 消除"冰盖与河网割裂"感.
+    _lat_abs_ = np.abs(lats)[:, None]
+    _melt_belt = (_lat_abs_ >= 58.0) & (_lat_abs_ <= 78.0) & land
+    if _melt_belt.any():
+        _thr_mt = float(np.quantile(acc[land], 0.985))
+        melt_riv = _melt_belt & (acc >= _thr_mt)
+        if melt_riv.any():
+            _w_melt = np.clip(0.30 + 0.70 * alpha[melt_riv], 0.0, 1.0)
+            rgb[melt_riv] = (rgb[melt_riv] * (1.0 - 0.55 * _w_melt[:, None])
+                             + np.array([0.14, 0.30, 0.52], np.float32)
+                             * (0.55 * _w_melt[:, None]))
     # 海冰: 纬度 + 噪声, 平滑边缘 (地球海冰边界约 70-75°)
     edge_sea = 78.0 + 2.5 * fbm1d(S, 320, rng)
     sig = 1.0 / (1.0 + np.exp(-(np.abs(lats)[:, None] - edge_sea[None, :]) / 1.6))
@@ -455,6 +549,12 @@ def render_world(v01, lats, landS, cmap, rng, tect_ctx=None, *, _profile=False):
     floe = gaussian_filter(_lowres_fbm(S, 24, 3, rng=rng), 0.8)
     sea_ice &= (floe > -1.1) | (np.abs(lats)[:, None] > edge_sea[None, :] + 4)
     rgb[sea_ice] = rgb[sea_ice] * 0.30 + np.array([0.88, 0.93, 0.97]) * 0.70
+    # v33: 极点末端平滑 → 纯净白冰盘 (88°→90° 渐变过渡), 消除等距圆柱投影
+    #      在南北极的硬裁剪边 (底部陆地/海冰直切, 呈"绘图工具裁切"假象)
+    _pole_ramp = np.clip((np.abs(lats)[:, None] - 86.5) * 1.5, 0.0, 1.0)
+    if (_pole_ramp > 0).any():
+        rgb = rgb * (1 - _pole_ramp[..., None]) + \
+            np.array([0.97, 0.98, 0.995])[None, None, :] * _pole_ramp[..., None]
     _mark("snowline+sea_ice")
     if _profile:
         print(f"    [render] TOTAL render_world: {_time.time()-_t[1]:.2f}s")
@@ -623,9 +723,10 @@ def create_continental_shelf(dem_m, lats, shelf_width_px=8,
     if not shelf_mask.any():
         return dem_m
 
-    # 按距离线性插值深度
+    # 按距离插值深度 (v33b: 线性→二次缓坡: 近岸保持缓深度更久, 外缘渐深,
+    # 消除海岸外 2-3 条明显色带"阶梯/等高线"感, 更贴近地球陆架缓坡形态)
     t = np.clip(dist[shelf_mask] / shelf_width_px, 0.0, 1.0)
-    target_depth = inner_depth + (outer_depth - inner_depth) * t
+    target_depth = inner_depth + (outer_depth - inner_depth) * (t * t)
 
     # 只修改比目标深度更深的像素（保留原有浅海）
     current = dem_m[shelf_mask]
@@ -722,7 +823,10 @@ def enhance_terrain_texture(dem_m, lats, rng=None):
 def generate_world(seed=0, size_px=2048, ckpt_path=None,
                    tect_res=512, out_png=None, out_npy=None,
                    enable_supervisor: bool = True,
-                   apply_suggestions: bool = True):
+                   apply_suggestions: bool = True,
+                   export_3d: bool = False,
+                   export_3d_mode: str = "both",
+                   export_3d_decimate: int = 4):
     """**项目主入口**：生成一整个幻想世界的米制 DEM + 气候终态渲染 PNG。
 
     四大阶段（1/4 → 4/4）：
@@ -828,7 +932,13 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
            + periodic_fbm(tect_res, 3.0, 2, rng) * 12.0
            + periodic_fbm(tect_res, 20.0, 2, rng) * 5.0)
     elev_T = warp_lonlat(elev_T.astype(np.float32), wxT, wyT, 1.0)
-    tect_T = np.stack([warp_lonlat(tect_T[i], wxT, wyT, 1.0) for i in range(4)])
+    # v38: 构造场弱扭曲 — 全幅 warp (±39px) 把细长山带切碎 (belt>0.35 AR 0.19,
+    # envS>0.2 205 碎片 vs 未扭曲 6.9/8 块), 后续 >2000m 山块全成 blob
+    # (belt_share 0.02-0.13 vs 地球 0.84). 构造带用 0.25 幅扭曲: 保持弧状弯曲
+    # 同时不撕裂长链; 海岸线 (elev_T/coast) 仍全幅扭曲, 差异 ≤~30px 视觉不可见.
+    _wk = float(os.environ.get("FWS_TECT_WARP", "0.25"))
+    tect_T = np.stack([warp_lonlat(tect_T[i], wxT * _wk, wyT * _wk, 1.0)
+                       for i in range(4)])
     crust_T = warp_lonlat(crust_T.astype(np.float32), wxT, wyT, 1.0)
     # v27: 海岸线形态学平滑 — 用圆形结构元对陆掩膜做开运算+闭运算,
     # 消除板块 Voronoi 产生的矩形尖角和长条狭缝, 使大陆轮廓更圆润自然.
@@ -853,9 +963,9 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
                             0, 2).astype(np.int8)
     else:
         margin_up = None
-    # M2 延展山带同步扭曲+上采样 → 骨架山脉纹理沿带走向
+    # M2 延展山带同步扭曲+上采样 → 骨架山脉纹理沿带走向 (v38: 弱扭曲保链)
     if belt_T is not None:
-        belt_T = warp_lonlat(belt_T.astype(np.float32), wxT, wyT, 1.0)
+        belt_T = warp_lonlat(belt_T.astype(np.float32), wxT * _wk, wyT * _wk, 1.0)
         beltS = np.clip(ndi_zoom(belt_T, up, order=1)[:size_px, :size_px],
                         0, 1).astype(np.float32)
     else:
@@ -880,16 +990,31 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
     elev_m += 190.0 * value_fbm(size_px, 24.0, 4, rng=rng)
     # 山脉: 束状分支(脊状fBm) + 宽度空间变化 → 消"贴边条"直线感
     # M2: 纹理场 = max(构造场, 0.85×延展山带) → 像素级山体沿延展带走向连续
+    # ===== v38: 山链连续化重构 =====
+    # 诊断 (diag_belt.py, seed0): plate_sim 输出的 belt 场本身 belt_share 0.94 /
+    # mean_AR 6.9 (地球 0.84/6.4), 但最终 DEM >2000m 山块只有 5% 落在带内
+    # (belt_share 0.02) —— 原 700·wvar·(ridged_fbm²) 的高频噪声把整条带切成
+    # 碎斑 (<0.3 的位置几乎不抬升), 散山 (板内造山/噪声丘) 反而主导山地.
+    # 修复: 带内**保底抬升** — 噪声只做相对起伏 (0.45+0.55·ridge), 整条构造带
+    # 走廊整体抬升 → 连续长链 >2000m; 带外山丘幅度降低 (反比 m_field) 减少碎山.
+    m_field = np.maximum(envS, 0.85 * beltS)
     wvar = np.clip(1.0 + 0.9 * value_fbm(size_px, 5.0, 3, rng=rng), 0.25, 2.0)
-    elev_m += 700.0 * np.maximum(envS, 0.85 * beltS) * wvar \
-              * (ridged_fbm(size_px, base_freq=14.0, octaves=4, rng=rng) ** 2)
+    _ridge = (ridged_fbm(size_px, base_freq=14.0, octaves=4, rng=rng) ** 2)
+    # v38: 脊状对比度 0.45+0.55·ridge → 0.80+0.20·ridge, 幅度 1600→1100.
+    # 地球高山带是平顶高原 (Tibet/Altiplano): 2000-3500m 带平均坡度仅 0.32°,
+    # 3500+ 0.50°; 本生成器 1.17°/1.70° (3-4x) —— 高频脊状纹理把山链刻成尖脊.
+    # 弱化带内起伏 → 高地带成"宽缓高原+坡缘", 坡度回地球量级 (山链连续性由
+    # 末次迁移保证, 此处只需给地形性格).
+    elev_m += 1100.0 * m_field * wvar * (0.80 + 0.20 * _ridge)
     elev_m += band * 300.0 * (value_fbm(size_px, 34.0, 3, rng=rng) - 0.35)   # 中观: 岬角/海湾
     elev_m += band * 150.0 * (value_fbm(size_px, 90.0, 2, rng=rng) - 0.3)
     elev_m += band * 85.0 * (value_fbm(size_px, 200.0, 2, rng=rng) - 0.28)   # 细观: 碎屑岸
     elev_m += band * 45.0 * (value_fbm(size_px, 450.0, 1, rng=rng) - 0.25)
     # 山间盆地 (费尔干纳型): 造山带内部低频凹坑
+    # v38: -2000→-1200 · 更弱掩码 — 窄山带 (4-6px@512) 被深切削整条切碎 →
+    # >2000m 山链断裂; 降到 1200m 让盆底仍高于山链底, 链保持连通
     imb = np.clip(value_fbm(size_px, 10.0, 3, rng=rng) - 1.1, 0, None)
-    elev_m = elev_m - 2000.0 * imb * np.clip(envS * 1.6 - 0.2, 0, 1) * (elev_m > 150)
+    elev_m = elev_m - 1200.0 * imb * np.clip(envS * 1.6 - 0.2, 0, 1) * (elev_m > 150)
     # 大陆腹地盆地 (刚果/塔里木型): 距海岸远的内部低地
     d_in = distance_transform_edt(elev_m > 0)
     deep_int = np.clip((d_in - 130.0) / 240.0, 0, 1)
@@ -985,7 +1110,7 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
     print(f"    [4/4 计时] global_envelope_match: {time.time()-_g_t0:.2f}s"); _g_t0 = time.time()
     out = lowfreq_consistency(out, bm, block, iters=2)
     print(f"    [4/4 计时] lowfreq_consistency: {time.time()-_g_t0:.2f}s"); _g_t0 = time.time()
-    out = despeckle(out, min_area=32)             # v6.6: 64→32 保住岛弧小岛
+    out = despeckle(out, min_area=150)            # v33: 32→90; v37: 90→150 (新海陆几何下 n_islands 220 vs 地球 113)
     print(f"    [4/4 计时] despeckle: {time.time()-_g_t0:.2f}s"); _g_t0 = time.time()
     out = droplet_erosion(out, rng=np.random.default_rng(seed + 77))   # V形谷/冲积扇
     print(f"    [4/4 计时] droplet_erosion: {time.time()-_g_t0:.2f}s"); _g_t0 = time.time()
@@ -1005,7 +1130,11 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
     print(f"    [4/4 计时] precipitation_field(mid): {time.time()-_g_t0:.2f}s"); _g_t0 = time.time()
     out = carve_trunk_rivers(out, np.random.RandomState(seed + 55),
                              precip=P_mid, temp=T_mid,
-                             warp_amp=3.0, warp_freq=10.0)    # v8.1 气候加权 + 曲率扰动干流河谷
+                             warp_amp=3.0, warp_freq=0.015)    # v8.1 气候加权 + 曲率扰动干流河谷
+                                                               # v34: warp_freq 10.0→0.015 修复 —
+                                                               # meander base_freq 是"每单位路径长度
+                                                               # 振荡数", 10.0 会让 500px 河道产生上千
+                                                               # 次像素级震荡, 平滑后河道退化为直线
     print(f"    [4/4 计时] carve_trunk_rivers: {time.time()-_g_t0:.2f}s"); _g_t0 = time.time()
     # v6.6: 窄带海岸锐化(±0.008v≈±160m) → 不再压掉陆架/抬升陆地直方图
     out = sharpen_coastline(out, band=0.008, expand=0.03)
@@ -1116,7 +1245,7 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
             total_land = land_b.sum()
             small_isle_mask = np.zeros_like(land_b)
             for cid in range(1, n_b + 1):
-                if 0 < sizes_b[cid] < total_land * 0.0003:  # <0.03% 陆地 = 极碎岛
+                if 0 < sizes_b[cid] < total_land * 0.001:  # v33: <0.1% 陆地 = 碎岛合并 (原 0.03%)
                     small_isle_mask |= (lab_b == cid)
             if small_isle_mask.any():
                 # 碎岛降为浅海 (-30m), 与大陆架融合 → 减少出口
@@ -1140,12 +1269,25 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
     # 注: M5 河床 z_riv=z_out+1.8·d_o 对大盆地可达数千米, 须由后续 high_elev_compress 压缩
     dem_b, n_b, b_info = add_craton_basins(dem_m, envS,
                                            np.random.RandomState(seed + 66),
-                                           belt=beltS, lats=lats, max_exo=1,
-                                           target_lo=0.03, target_hi=0.08)
+                                           belt=beltS, lats=lats, max_exo=3,
+                                           max_endo=1, precip=P_mid,
+                                           endo_p_max=800.0,
+                                           target_lo=0.03, target_hi=0.08,
+                                           dyke_coast_excl=float(os.environ.get("FWS_DYKE_COAST", "40.0")),
+                                           dyke_height=float(os.environ.get("FWS_DYKE_H", "250.0")),
+                                           basin_max_share=float(os.environ.get("FWS_BASIN_MAX", "0.10")))
     if n_b:
         dem_m = dem_b
         print(f"      M5 大流域盆地: {n_b}个 [{b_info}]")
     print(f"    [4/4 计时] add_craton_basins: {time.time()-_g_t0:.2f}s"); _g_t0 = time.time()
+    # ---- v33c: 造山带聚合已撤销 ----
+    # 实测 (seeds 32-36, 三种方案): 沿 envS/beltS 的 DEM 抬升 (脊状或连续) 均把山地
+    #   切成更多孤立块 (n_mtn_ranges 38→66↑), 降低 belt_share_of_mtn 并横切 M5 大流域
+    #   (largest_basin_share 0.105→0.006↓), 湖泊反升. 根因: 本生成器的板块边界场
+    #   (envS/beltS) 本身就是零散短弧, 抬升只是放大碎片化, 无法造出地球式的少数
+    #   巨长山链. 山系连带的真正修复需强化 plate_sim 的俯冲带连续性, 属下一阶段.
+    #   保留的改进: 山地脊状渲染纹理 (v33) 让已有山地视觉上更线性.
+    print(f"    [4/4 计时] v33 belt_aggregate(removed): 0.00s"); _g_t0 = time.time()
     # ---- v27: 全球陆地比例双向校准到 ~30% (地球 29.16%), 在 M5 之后 ----
     # 陆地过多 → 淹没最低低地; 陆地不足 → 抬升最浅海床. 双向保证目标比例.
     _target_land = 0.30
@@ -1209,6 +1351,93 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
     out = land_hist_final(m2v(dem_m), lats)
     dem_m = v2m(out)
     print(f"    [4/4 计时] land_hist_final(v30 末次): {time.time()-_g_t0:.2f}s"); _g_t0 = time.time()
+    # ---- v38: 终稿山链迁移 (修复"山系不成带") ----
+    # 诊断 (diag_belt, seed0): plate_sim 的 belt/envS 场本身 AR 6.9 (≈地球 6.4),
+    # 但 >2000m 高山被 GAN 质量块/板内造山/岛弧等"散山"占满 (最大单体 31k px
+    # AR 2.4, 平均 4.3km), 带内山块占比仅 16% → belt_share 0.02-0.12 vs 地球 0.84.
+    # 历次前置抬升 (700-1600m) 都会被后续 GAN/直方图重排稀释, 无法把带顶到
+    # 最高的 10-11% 排名区 (那里的山才是 >2000m 山块统计源).
+    # 解法 (v30 同款收尾模式): 在**末次直方图之后**给构造带走廊二次抬升, 再跑
+    # 一次 land_hist_final 恢复地球海拔分布 —— 单调重排不改变全球陆地/海陆比例,
+    # 只让"最高排名"净迁移到连续山链上 → 高山成带, 散山降为低山丘陵(坡度同步降).
+    _beltX = np.maximum(envS, 0.85 * beltS)
+    if _beltX.max() > 0.05:
+        _ld = float(os.environ.get("FWS_LIFT", "2000.0"))
+        _pd = float(os.environ.get("FWS_PEN", "1800.0"))
+        _sd = float(os.environ.get("FWS_SIG", "3.0"))
+        # 平滑加宽带走廊 (σ≈50px), 弥合带内 <2000m 空隙, 链不断裂
+        _beltB = gaussian_filter(_beltX.astype(np.float32), _sd)
+        # v38: 先重度平滑山核 (σ=4≈80px) 再整块抬升 — 末次 CDF 重排会把带内
+        # 残余纹理放大成坡度; 高原核心须在抬升**前**就是平的 (地球青藏/安第斯
+        # 高原核 ~0.3°), 纹理只留在 <2000m 边缘带.
+        _sm_belt = gaussian_filter(dem_m.astype(np.float32), 8.0)
+        _beltC = (_beltB > 0.30).astype(np.float32)
+        dem_m = np.where((dem_m > 0), dem_m * (1.0 - 0.92 * _beltC)
+                         + _sm_belt * (0.92 * _beltC), dem_m).astype(np.float32)
+        # 阶跃抬升: 山核 rank 均匀 → 平顶高原, 陡峭只在带缘过渡带
+        _beltM = np.clip((_beltB - 0.20) / 0.30, 0.0, 1.0).astype(np.float32)
+        _lift = (_ld * _beltM
+                 + 0.1 * _ld * _beltM * (value_fbm(size_px, 40.0, 3,
+                                                   rng=np.random.RandomState(seed + 9999)) - 0.5))
+        dem_m = np.where((dem_m > 0), dem_m + _lift, dem_m).astype(np.float32)
+        # 非带高地压降: 把占住排名高位但不成带的 GAN 质量块/散山按高度递减压回,
+        # 让"最高排名"净迁移到连续山链 (散山 → 低山丘陵, 顶部带与后者平滑交界)
+        _pen = _pd * (1.0 - _beltM) * np.clip((dem_m - 1100.0) / 1800.0, 0.0, 1.0)
+        dem_m = np.where((dem_m > 0), dem_m - _pen, dem_m).astype(np.float32)
+        out = land_hist_final(m2v(dem_m), lats)
+        dem_m = v2m(out)
+        print(f"      [v38] 山链迁移: lift={_ld:.0f} pen={_pd:.0f} sig={_sd:.1f} "
+              f"带 {int((_beltB > 0.2).sum())}px, 压降 {int((_pen > 50).sum())}px",
+              flush=True)
+    print(f"    [4/4 计时] belt_migrate(v38 末次): {time.time()-_g_t0:.2f}s"); _g_t0 = time.time()
+    # ---- v38: 山地坡度过陡软化 ----
+    # 山链迁移把高山净搬到持续山带, 但带缘/岩壁仍比地球陡 (0.60 vs 0.41).
+    # 对陆地局部坡度 >1.2° 的像素按 (sl-1.2)/2.2 ∈[0,1] 权重混合 σ=2 平滑:
+    # 只软化亚像素-数像素级陡坎, 不削高原/山链 (>1 度以上的真实山地保留).
+    _sm_ = gaussian_filter(dem_m.astype(np.float32), 2.0)
+    _gy_, _gx_ = np.gradient(dem_m.astype(np.float64))
+    _dy_m_ = 111320.0 * 180.0 / size_px
+    _dx_m_ = (111320.0 * 360.0 / size_px) * \
+        np.cos(np.deg2rad(lats.astype(np.float64)))
+    _sl_ = np.rad2deg(np.arctan(np.hypot(_gx_ / _dx_m_[:, None], _gy_ / _dy_m_)))
+    _soft_ = (dem_m > 0) & (_sl_ > 1.0)
+    if _soft_.any():
+        _w_ = np.clip((_sl_ - 1.0) / 2.0, 0.0, 1.0) * 0.65
+        dem_m = np.where(_soft_, dem_m * (1.0 - _w_) + _sm_ * _w_, dem_m) \
+            .astype(np.float32)
+        # 注: 不再补跑 land_hist_final — 平滑的对称性使海拔分布漂移极小 (<1%),
+        # 避免 CDF 重排把坡度重新拉高 (已验证 0.60 不动的元凶)
+        print(f"      [v38] 坡度软化: {int(_soft_.sum())}px (sl>1.0°)", flush=True)
+    print(f"    [4/4 计时] slope_relax(v38): {time.time()-_g_t0:.2f}s"); _g_t0 = time.time()
+    # ---- v37: 末次大陆架重建 (修复 land_fraction_calibration 吃掉陆架) ----
+    # 早期 create_continental_shelf(1213) 建的 -200~0m 陆架带会被后续 M5 重塑与
+    # land_fraction_calibration(抬升浅海补齐陆地) 覆盖/消耗 —— v37 实测 ocean_-200_0
+    # 降到 0.004 (地球 0.071), 3D 球体上海岸直落入深海、无陆架. 在末次高程后重建:
+    # 仅作用于 dem<0 且 <5px 的海, 与陆地/河网/直方图无冲突.
+    dem_m = create_continental_shelf(dem_m, lats, shelf_width_px=6, outer_depth=-180.0)
+    print(f"    [4/4 计时] shelf_rebuild(v37 末次): {time.time()-_g_t0:.2f}s"); _g_t0 = time.time()
+    # ---- v34: M5 倾斜面后重雕刻蜿蜒河道 (打破"平行直线河"纹理) ----
+    # 诊断 (seeds 32-36 实测): M5 线性倾斜面使流域内 D8 流线全部平行笔直,
+    # 地图上呈现 45° 等间距斜线纹理 (河流蜿蜒度 1.00-1.04, 地球 ~2+);
+    # 且早期 carve_trunk_rivers 的蜿蜒河道被 M5 倾斜面覆盖抹除.
+    # 解决: 在绝对地形终稿上重跑轻量蜿蜒雕刻 —— 从最终 DEM 提取河网骨架
+    # → meander 蜿蜒化 → 沿中心线雕刻, 使最终渲染的河流 (含 M5 盆地内的
+    # 干流与支流) 恢复自然蜿蜒形态, 同时保留源头/分水岭结构.
+    _v34_t0 = time.time()
+    try:
+        v01_end = m2v(dem_m)
+        v01_end = carve_trunk_rivers(
+            v01_end, np.random.RandomState(seed + 777),
+            precip=P_mid, temp=T_mid,
+            sigma=2.5, q=0.998, max_depth=0.022, width=2.8,
+            warp_amp=4.5, warp_freq=0.015,
+            q_levels=(0.992, 0.976, 0.955),
+            hack_law=True, oxbow=True)
+        dem_m = v2m(v01_end)
+        print(f"    [4/4 计时] v34_redecorate_rivers(末次蜿蜒雕刻): {time.time()-_v34_t0:.2f}s")
+    except Exception as _e:
+        print(f"      [v34_redecorate_rivers 跳过] {_e}")
+    _g_t0 = time.time()
 
     np.save(out_npy, dem_m.astype(np.float32))
     # v7.8: 构造 tect_ctx 供 render_world 地貌子类分类
@@ -1218,6 +1447,12 @@ def generate_world(seed=0, size_px=2048, ckpt_path=None,
                     tect_T=tect_T_full, margin_up=margin_up, riftS=riftS)
     plt.imsave(out_png, render_world(out, lats, landS, make_terrain_cmap(),
                                      np.random.RandomState(seed), tect_ctx=tect_ctx))
+    # ---- 3D 导出（可选，默认关闭；产物写在 DEM 同目录）----
+    # v36+: 放在 render_world 之后，使 --texture auto 能复用刚生成的 world_map.png
+    if export_3d:
+        from .export_3d import export_world
+        export_world(dem_m, os.path.dirname(os.path.abspath(out_npy)),
+                     mode=export_3d_mode, decimate=export_3d_decimate)
     print(f"    [4/4 计时] save npy + render_world: {time.time()-_g_t0:.2f}s")
     print(f"    [阶段计时] [4/4] 全局阶段总计: {time.time()-_stage_t0:.2f}s")
     print(f"\n完成: {out_png} + {out_npy} + world_skeleton.png")
@@ -1249,8 +1484,14 @@ def main():
     ap.add_argument("--size", type=int, default=4096, choices=[2048, 4096])
     ap.add_argument("--ckpt", default=None)   # 默认: 脚本目录内 best_terrain_gan_v5.pth
     ap.add_argument("--tect-res", type=int, default=512)
+    ap.add_argument("--export-3d", action="store_true",
+                    help="生成后导出 3D 模型 (OBJ+glTF, 平面+球体)")
+    ap.add_argument("--export-3d-mode", choices=["plane", "globe", "both"], default="both")
+    ap.add_argument("--export-3d-decimate", type=int, default=4)
     a = ap.parse_args()
-    generate_world(seed=a.seed, size_px=a.size, ckpt_path=a.ckpt, tect_res=a.tect_res)
+    generate_world(seed=a.seed, size_px=a.size, ckpt_path=a.ckpt, tect_res=a.tect_res,
+                   export_3d=a.export_3d, export_3d_mode=a.export_3d_mode,
+                   export_3d_decimate=a.export_3d_decimate)
 
 
 if __name__ == "__main__":

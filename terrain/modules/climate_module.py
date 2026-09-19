@@ -355,10 +355,20 @@ def precipitation_field(lats, elev_m, rng=None, dP=None, ci=None,
     base = np.maximum(base + dP_sub, 0.0)
 
     # v20: dry_cap 从 <10° 扩展至 <23.5° (整个热带带), 压缩热带季节林
+    # v33: 赤道湿带拆分 —— 旧版把整个 <23.5° 都压到 ≤1350mm (沿海), 导致赤道
+    #      (0-10°) 也不可能出现热带雨林 (P≥3000mm), 雨林占比≈0 (地球 0.9% 陆地).
+    #      现保留 10-23.5° 的稀树草原/荒漠压制, 但 0-10° 湿赤道带放开上界:
+    #      沿海对流雨 ~3400mm (雨林), 内陆 2000mm (热带季节林) → 纬度地带性重现.
+    wet_eq = np.zeros((h, w), dtype=bool)          # v33b: 防御性初始化 (无赤道陆地时)
+    low_eq = np.zeros((h, w), dtype=bool)
     eq_band = (a[:, None] < 23.5) & land
     if eq_band.any():
         # 海岸 1350mm (稀树草原/季节林边界), 内陆快速降至 350mm (荒漠)
         dry_cap = 350.0 + 1000.0 * np.exp(-d_sea_km / 1100.0)
+        # v33: 0-10° 湿赤道带 (ITCZ): 上界抬高至 1800(内陆)~3400(沿海)mm
+        wet_eq = (a[:, None] < 10.0)
+        wet_cap = 1800.0 + 1600.0 * np.exp(-d_sea_km / 2400.0)
+        dry_cap = np.where(wet_eq, wet_cap, dry_cap)
         low_eq = (elev_pos_raw < 300.0) & eq_band
         if low_eq.any() and w > 0:
             lon = (np.arange(w, dtype=np.float64) / w) * 2.0 * np.pi
@@ -433,6 +443,18 @@ def precipitation_field(lats, elev_m, rng=None, dP=None, ci=None,
                 shield = _mountain_shield(mt_sm, hh, shield, h, w,
                                            belt_rows, step_sign, K_max)
     P = np.maximum(P - shield, 0.0)
+    # v33b: ITCZ 对流雨保底 —— 东西/南北地形雨扫描的水汽走廊衰减 (0.10+0.90·m)
+    #       会把赤道内陆降水压到 base 的 ~30% (实际 P 中位 ~1100mm, 全是荒漠/稀疏草原).
+    #       但地球热带对流雨 (阿马孙/刚果内陆 2000-3000mm) 由局地蒸发-对流驱动,
+    #       不受盛行西风水汽走廊限制. 这里给 0-12° 湿赤道带一个随纬度渐消的对流雨下限:
+    #       0° ≈2600mm (雨林) → 12° →0, 使纬度地带性 (赤道雨林带) 真正出现.
+    if wet_eq.any():
+        _itcz = np.clip(1.0 - (a2d - 1.0) / 11.0, 0.0, 1.0)
+        if low_eq.any() and w > 0:
+            _lon = (np.arange(w, dtype=np.float64) / w) * 2.0 * np.pi
+            _wm = 0.55 + 0.45 * (np.cos(3.0 * _lon + 0.7) ** 2)[None, :]
+            _itcz = _itcz * (0.72 + 0.28 * _wm)          # 经度向季节雨调制 (保留稀树草原纹理)
+        P = np.maximum(P, 2600.0 * _itcz * land * wet_eq)
     P = gaussian_filter(P.astype(np.float32), [2.2, 1.2]).astype(np.float64)
 
     if dP is not None:
@@ -451,9 +473,21 @@ def precipitation_field(lats, elev_m, rng=None, dP=None, ci=None,
 BIOME_NAMES = ["苔原", "北方针叶林", "温带草原", "温带落叶林", "温带雨林",
                "亚热带荒漠", "稀树草原", "热带季节林", "热带雨林"]
 BIOME_COLORS = np.array([
-    [0.62, 0.60, 0.55], [0.30, 0.42, 0.30], [0.72, 0.65, 0.38],
-    [0.42, 0.55, 0.30], [0.24, 0.44, 0.24], [0.87, 0.76, 0.55],
-    [0.79, 0.68, 0.38], [0.40, 0.56, 0.28], [0.16, 0.38, 0.18]], np.float32)
+    # 顺序: 苔原(0)/北方针叶林(1)/温带草原(2)/温带落叶林(3)/温带雨林(4)/
+    #        荒漠(5)/稀树草原(6)/热带季节林(7)/热带雨林(8)
+    # v34: 提高气候带区分度 — 荒漠更亮沙、雨林更深绿、针叶林更冷暗,
+    #      修复"地图只有绿/棕, 沙漠带和雨林带不明显"的观感.
+    # v35b: 提亮森林/草地色系 —— v34 把森林类整体调暗, 叠加 shade 低地压制后
+    #      大陆中央低地呈大面积暗绿/暗褐"阴影区"(用户反馈); 卫星图陆地不暗.
+    [0.66, 0.63, 0.56],   # 0 苔原: 灰褐
+    [0.36, 0.45, 0.35],   # 1 北方针叶林: 冷绿 (v34 0.24 过暗)
+    [0.82, 0.76, 0.42],   # 2 温带草原: 亮黄绿
+    [0.52, 0.64, 0.36],   # 3 温带落叶林: 明绿 (v34 0.38 过暗)
+    [0.28, 0.48, 0.28],   # 4 温带雨林: 绿 (v34 0.17 过暗)
+    [0.94, 0.83, 0.58],   # 5 荒漠: 亮沙色
+    [0.87, 0.76, 0.46],   # 6 稀树草原: 黄褐
+    [0.46, 0.63, 0.30],   # 7 热带季节林: 亮绿 (v34 0.34 过暗)
+    [0.18, 0.42, 0.19]], np.float32)  # 8 热带雨林: 深绿 (保留最深, 但 v34 0.09 过黑)
 
 
 def whittaker_biome(t, p, lats=None, ci=None):
@@ -498,13 +532,15 @@ def whittaker_biome(t, p, lats=None, ci=None):
 
     # v24: 荒漠阈值 1200→1300mm; 稀树草原阈值 1800→2000mm
     # 目的: 稀树草原(7.2% vs 3.5%)和热带季节林(2.2% vs 1.4%)进一步转移为荒漠
+    # v33b: 雨林降水阈值 3000→2600mm — 配合 ITCZ 对流雨保底 (0°≈2600mm),
+    #       使赤道带核心区真正表现为热带雨林 (地球雨林区年降水 2000-3000mm 常见)
     return np.select(
         [t_arr <= t_tundra, t_arr <= t_taiga_up,
          cold_desert_override,
          (t_arr <= 20) & (p_arr < p_stp),
          (t_arr <= 20) & (p_arr < p_tf),
          t_arr <= 20,
-         p_arr < 1300, p_arr < 2000, p_arr < 3000],
+         p_arr < 1300, p_arr < 2000, p_arr < 2600],
         [0, 1, 5, 2, 3, 4, 5, 6, 7], default=8).astype(np.int8)
 
 

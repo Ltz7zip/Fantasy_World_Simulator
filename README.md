@@ -146,6 +146,9 @@ python -m terrain.core.generate_world --seed 0 --size 2048
 | **交互 HTML 报告（仅 HTML）**               | `python -m terrain.core.visualize_context --seed 1 --no-png --html`                                                                                        |
 | **PNG + HTML 双产出 + 叠加元素**            | `python -m terrain.core.visualize_context --seed 1 --html --points "39,116,CityA,35,139,CityB" --poly "30,-5,30,35,45,35,45,-5" --profile "60,-10,25,125"` |
 | 只调渲染不改地形                             | `python -m terrain.core.rerender`                                                                                                                          |
+| **3D 模型导出 + 桌面预览**                   | `python -m terrain.core.export_3d --seed 1 --preview`（默认导出 OBJ+glTF、平面+球体；预览自动「海平面裁剪 + 自适应夸张 + 加密网格」，`--help` 查看全部选项）                                                     |
+| **3D 平海导出（海岸锋利贴合）**               | `python -m terrain.core.export_3d --coast-cut --exagg-globe 80 --mode globe`（导出默认保留海底起伏，`--coast-cut` 压平海洋到海平面）                                                            |
+| 生成并同步导出 3D                            | `python -m terrain.core.generate_world --seed 1 --size 2048 --export-3d`                                                                                  |
 | 单独调试板块模拟                             | `python -m terrain.core.plate_sim --seed 7 --T 512`                                                                                                        |
 | 批量生成多种子                              | `python terrain/scripts/batch_gen.py --seeds 1 2 3 4 5`                                                                                                    |
 | 地理指标检验 (vs 地球)                       | `python terrain/scripts/analyze_worlds.py` → 输出 `analysis_results.json`                                                                                    |
@@ -191,6 +194,7 @@ python -m terrain.core.generate_world --seed 0 --size 2048
 | `world_skeleton.png`        | GAN 细化前的构造骨架（域扭曲后的板块 + 造山带 + 裂谷 + 海岸分形）。用来检查大陆走向、山带连续性。                                                                             |
 | `geoctx_visual_seed{}.png`  | 4 面板可视化：**高程 / 坡度 / 地理带 / 剖面**，附带探针点定位、多边形统计。                                                                                       |
 | `geoctx_report_seed{}.html` | **单文件离线交互 HTML 报告**（≈4 MB，零外链）：高程 / 坡度 / 地理带三图层切换、鼠标悬停经纬度 + 海拔 + 坡度 + 海陆查询、探针点表 ↔ 地图跳转、多边形统计 Pill、剖面 Canvas 十字线联动地图。**双击即可在浏览器打开**。 |
+| `world_3d_{plane,globe}.obj` 等 | 3D 模型导出：`.obj`（+`.mtl`+`*_tex.png` 高程着色纹理）与 `.gltf`（自包含单文件，纹理内嵌）。平面浮雕与球体星球双形态，`--preview` 打开 PyVista GPU 桌面窗口（缺失时回退 matplotlib）。默认导出保留海底起伏；`--coast-cut` 压平海洋使海岸锋利贴合。 |
 
 ## 常见问题 FAQ
 
@@ -289,6 +293,7 @@ v10 起新增 `terrain/native/`（pybind11 扩展 `fws_native`），把最耗时
 | `numpy`      | ≥ 1.22 | DEM 数组 / 板块模拟 / 统计               |
 | `scipy`      | ≥ 1.9  | 高斯滤波 / 距离变换 / 双线性重采样 (HTML 报告图层) |
 | `matplotlib` | ≥ 3.6  | 彩色渲染 / 4 面板 PNG / 色图             |
+| `pyvista`    | ≥ 0.49 | 3D 预览 GPU 渲染（可选；缺失时回退 matplotlib，预览交互会明显变卡） |
 | `Pillow`     | ≥ 9.0  | PNG 保存 / HTML 图层 base64 编码       |
 | `pytest`     | ≥ 7.0  | 单元测试（开发可选）                       |
 | `pybind11`   | ≥ 2.10 | 构建 C++ 原生扩展（仅改 native/ 后需要）      |
